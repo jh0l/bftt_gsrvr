@@ -18,3 +18,5 @@
 
 # VS Code workspace config
 .vscode
+Cargo.lock
+.env
