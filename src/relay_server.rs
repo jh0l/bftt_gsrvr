@@ -61,6 +61,11 @@ impl actix::Message for ListGames {
     type Result = Vec<String>;
 }
 
+pub enum GameOperation {
+    Success(String),
+    Fail(String),
+}
+
 /// Host a game, if already exists throw error
 #[derive(Clone, Debug)]
 pub struct HostGame {
@@ -68,21 +73,20 @@ pub struct HostGame {
     pub game_id: String,
 }
 impl actix::Message for HostGame {
-    type Result = HostGameResult;
-}
-pub enum HostGameResult {
-    Success(String),
-    Fail(String),
+    type Result = GameOperation;
 }
 
 /// Join game, if non-existant throw error
-#[derive(Message, Debug)]
-#[rtype(result = "()")]
-pub struct Join {
-    /// session id of sender
+#[derive(Clone, Debug)]
+pub struct JoinGame {
+    /// session id of joiner
     pub user_id: String,
     /// publisher id
     pub game_id: String,
+}
+
+impl actix::Message for JoinGame {
+    type Result = GameOperation;
 }
 
 /// `RelayServer` manages users and games
@@ -144,7 +148,7 @@ impl Handler<Connect> for RelayServer {
             if let Some(addr) = msg_addr {
                 let res = self.sessions.insert(user_id.clone(), addr);
                 if let Some(addr) = res {
-                    do_send_log(&addr, "/error new login elsewhere");
+                    do_send_log(&addr, "/login new login elsewhere");
                 };
             }
         }
@@ -180,11 +184,11 @@ impl Handler<HostGame> for RelayServer {
             if game.host_user_id == Some(host_user_id) {
                 let data = serde_json::to_string(&game);
                 return match data {
-                    Ok(s) => MessageResult(HostGameResult::Success(s.to_owned())),
-                    Err(e) => MessageResult(HostGameResult::Fail(format!("{:?}", e).to_owned())),
+                    Ok(s) => MessageResult(GameOperation::Success(s.to_owned())),
+                    Err(e) => MessageResult(GameOperation::Fail(format!("{:?}", e).to_owned())),
                 };
             }
-            return MessageResult(HostGameResult::Fail(
+            return MessageResult(GameOperation::Fail(
                 format!("{} exists", game_id).to_owned(),
             ));
         }
@@ -192,9 +196,40 @@ impl Handler<HostGame> for RelayServer {
         self.games.insert(game_id.clone(), game.clone());
         let data = serde_json::to_string(&game);
         match data {
-            Ok(s) => MessageResult(HostGameResult::Success(s.to_owned())),
-            Err(e) => MessageResult(HostGameResult::Fail(format!("{:?}", e).to_owned())),
+            Ok(s) => MessageResult(GameOperation::Success(s.to_owned())),
+            Err(e) => MessageResult(GameOperation::Fail(format!("{:?}", e).to_owned())),
         }
+    }
+}
+
+impl Handler<JoinGame> for RelayServer {
+    type Result = MessageResult<JoinGame>;
+    fn handle(&mut self, msg: JoinGame, _: &mut Context<Self>) -> Self::Result {
+        let JoinGame { game_id, user_id } = msg;
+        let sessions = &self.sessions;
+        let res = self
+            .games
+            .get_mut(&game_id)
+            .ok_or("game not found".to_owned())
+            .and_then(|game| game.insert_player(user_id.clone()).map(|_| game))
+            .and_then(|game| match serde_json::to_string(&game) {
+                Ok(s) => Ok((game, s)),
+                Err(e) => Err(format!("{:?}", e).to_owned()),
+            })
+            .and_then(|(game, game_json)| {
+                for k in &mut game.players.keys() {
+                    if k != &user_id {
+                        if let Some(session) = sessions.get(k) {
+                            do_send_log(session, &format!("/player_joined {}", game_json));
+                        }
+                    }
+                }
+                Ok(game_json)
+            });
+        MessageResult(match res {
+            Ok(s) => GameOperation::Success(s),
+            Err(e) => GameOperation::Fail(e),
+        })
     }
 }
 
@@ -304,10 +339,10 @@ impl WsSession {
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     match res {
-                        HostGameResult::Success(msg) => {
+                        GameOperation::Success(msg) => {
                             ctx.text(format!("/host_game_success {:?}", msg));
                         }
-                        HostGameResult::Fail(msg) => {
+                        GameOperation::Fail(msg) => {
                             ctx.text(format!("/error {:?}", msg));
                         }
                     }
@@ -318,6 +353,32 @@ impl WsSession {
         Ok(())
     }
 
+    fn join_game(&self, game_id: &str, ctx: &mut ws::WebsocketContext<Self>) -> Result<(), String> {
+        if self.user_id.is_none() {
+            return Err("user not logged in".to_owned());
+        }
+        self.server_addr
+            .send(JoinGame {
+                game_id: game_id.to_owned(),
+                user_id: self.user_id.clone().unwrap(),
+            })
+            .into_actor(self)
+            .then(|res, act, ctx| {
+                if let Ok(res) = act.mailbox_check(res, ctx) {
+                    match res {
+                        GameOperation::Success(msg) => {
+                            ctx.text(format!("/join_game_success {:?}", msg));
+                        }
+                        GameOperation::Fail(msg) => {
+                            ctx.text(format!("/error {:?}", msg));
+                        }
+                    }
+                }
+                fut::ready(())
+            })
+            .wait(ctx);
+        Ok(())
+    }
     fn parse_message(
         &mut self,
         text: &str,
@@ -333,6 +394,7 @@ impl WsSession {
         match cmd {
             "/login" => self.relay_connect(from_json::<Identity>(&msg)?, ctx),
             "/host_game" => self.host_game(&msg, ctx),
+            "/join_game" => self.join_game(&msg, ctx),
             _ => Err(format!("unknown command type {:?}", m).to_owned()),
         }
     }

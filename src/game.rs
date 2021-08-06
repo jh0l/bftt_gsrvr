@@ -27,7 +27,15 @@ impl Player {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub enum GamePhase {
+    Init,
+    InProg,
+    End,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Game {
+    pub phase: GamePhase,
     pub game_id: String,
     pub host_user_id: Option<String>,
     pub players: HashMap<String, Player>,
@@ -36,6 +44,7 @@ pub struct Game {
 impl Game {
     pub fn new(game_id: String) -> Game {
         Game {
+            phase: GamePhase::Init,
             game_id,
             host_user_id: None,
             players: HashMap::new(),
@@ -43,11 +52,16 @@ impl Game {
     }
     pub fn set_host(mut self, host_id: String) -> Self {
         self.host_user_id = Some(host_id.clone());
-        self.insert_player(host_id)
+        self.insert_player(host_id).expect("setting host");
+        self
     }
 
-    pub fn insert_player(mut self, user_id: String) -> Self {
-        self.players.insert(user_id.clone(), Player::new(user_id));
-        self
+    pub fn insert_player(&mut self, user_id: String) -> Result<String, String> {
+        if matches!(self.phase, GamePhase::Init) {
+            self.players
+                .insert(user_id.clone(), Player::new(user_id.clone()));
+            return Ok(format!("player {} joined", user_id).to_owned());
+        }
+        return Err("Game in progress".to_owned());
     }
 }
