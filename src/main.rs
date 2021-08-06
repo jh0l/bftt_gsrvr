@@ -1,10 +1,3 @@
-//! Example of login and logout using redis-based sessions
-//!
-//! Every request gets a session, corresponding to a cache entry and cookie.
-//! At login, the session key changes and session state in cache re-assigns.
-//! At logout, session state in cache is removed and cookie is invalidated.
-//!
-
 use actix::prelude::*;
 use actix_cors::Cors;
 use actix_http::http::header;
@@ -19,8 +12,13 @@ use actix_web::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::relay_server::ws_route;
+
+mod common;
 mod game;
 mod relay_server;
+
+use common::Identity;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct IndexResponse {
@@ -35,12 +33,6 @@ async fn index(session: Session) -> Result<HttpResponse> {
         user_id,
         msg: "".to_owned(),
     }))
-}
-
-#[derive(Deserialize)]
-struct Identity {
-    user_id: String,
-    password: String,
 }
 
 async fn login(
@@ -60,26 +52,23 @@ async fn login(
         .await
         .expect("login contact with relay failed");
     match res {
-        relay_server::ConnectResult::FailPassword => {
+        relay_server::ConnectResult::Fail(_) => {
             Ok(HttpResponse::Unauthorized().json(IndexResponse {
                 user_id: Some(user_id),
                 msg: "pasword does not match saved".to_owned(),
             }))
         }
-        relay_server::ConnectResult::SuccExists => {
+        relay_server::ConnectResult::Success(s) => {
             session.set("user_id", &user_id)?;
             session.renew();
+            let msg = match s {
+                relay_server::Success::Exists => "Exists",
+                relay_server::Success::New => "New",
+            }
+            .to_owned();
             Ok(HttpResponse::Ok().json(IndexResponse {
                 user_id: Some(user_id),
-                msg: "exists".to_owned(),
-            }))
-        }
-        relay_server::ConnectResult::SuccNew => {
-            session.set("user_id", &user_id)?;
-            session.renew();
-            Ok(HttpResponse::Ok().json(IndexResponse {
-                user_id: Some(user_id),
-                msg: "new".to_owned(),
+                msg,
             }))
         }
     }
@@ -142,13 +131,14 @@ async fn main() -> std::io::Result<()> {
                     .supports_credentials()
                     .max_age(3600),
             )
-            .wrap(RedisSession::new("127.0.0.1:6379", &private_key))
+            .wrap(RedisSession::new("127.0.0.1:6379", &private_key).cookie_http_only(false))
             // enable logger - always register actix-web Logger middleware last
             .wrap(middleware::Logger::default())
             .data(relay.clone())
             .service(resource("/").route(get().to(index)))
             .service(resource("/login").route(post().to(login)))
             .service(resource("/logout").route(post().to(logout)))
+            .service(resource("/ws/").to(ws_route))
         // .configure(services::config)
     })
     .bind("127.0.0.1:8080")?
