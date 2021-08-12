@@ -23,16 +23,13 @@ use common::Identity;
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct IndexResponse {
     user_id: Option<String>,
-    msg: String,
+    msg: Option<String>,
 }
 
 async fn index(session: Session) -> Result<HttpResponse> {
     let user_id: Option<String> = session.get::<String>("user_id").unwrap();
-
-    Ok(HttpResponse::Ok().json(IndexResponse {
-        user_id,
-        msg: "".to_owned(),
-    }))
+    let msg: Option<String> = session.get::<String>("token").unwrap();
+    Ok(HttpResponse::Ok().json(IndexResponse { user_id, msg }))
 }
 
 async fn login(
@@ -45,7 +42,7 @@ async fn login(
         .send(relay_server::Connect {
             user: relay_server::User {
                 user_id: user_id.clone(),
-                password,
+                password: password.clone(),
             },
             addr: None,
         })
@@ -55,17 +52,20 @@ async fn login(
         relay_server::ConnectResult::Fail(_) => {
             Ok(HttpResponse::Unauthorized().json(IndexResponse {
                 user_id: Some(user_id),
-                msg: "pasword does not match saved".to_owned(),
+                msg: Some("pasword does not match saved".to_owned()),
             }))
         }
         relay_server::ConnectResult::Success(s) => {
             session.set("user_id", &user_id)?;
+            session.set("token", &password)?;
             session.renew();
-            let msg = match s {
-                relay_server::Success::Exists => "Exists",
-                relay_server::Success::New => "New",
-            }
-            .to_owned();
+            let msg = Some(
+                match s {
+                    relay_server::Success::Exists => "Exists",
+                    relay_server::Success::New => "New",
+                }
+                .to_owned(),
+            );
             Ok(HttpResponse::Ok().json(IndexResponse {
                 user_id: Some(user_id),
                 msg,
