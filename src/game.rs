@@ -2,6 +2,7 @@ use rand::distributions::Uniform;
 use rand::prelude::{Distribution, ThreadRng};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Pos {
@@ -58,7 +59,7 @@ impl Board {
         if x >= len || y >= len {
             return Err("out of range".to_owned());
         }
-        return Ok(&mut self.0[x][y]);
+        return Ok(&mut self.0[y][x]);
     }
 }
 
@@ -75,9 +76,9 @@ pub struct Game {
     pub phase: GamePhase,
     pub host_user_id: Option<String>,
     pub players: HashMap<String, Player>,
-    pub turn_time_secs: u32,
+    pub turn_time_secs: u64,
     pub board: Board,
-    pub turn_end_unix: i64,
+    pub turn_end_unix: u64,
 }
 
 impl Game {
@@ -87,7 +88,7 @@ impl Game {
             game_id,
             host_user_id: None,
             players: HashMap::new(),
-            turn_time_secs: 60,
+            turn_time_secs: 10,
             board: Board::new(size),
             turn_end_unix: 0,
         }
@@ -110,10 +111,15 @@ impl Game {
         return Err("Game in progress".to_owned());
     }
 
-    pub fn start_game(&mut self, rnd: &mut ThreadRng) -> Result<String, String> {
+    pub fn start_game(&mut self, rnd: &mut ThreadRng) -> Result<(), String> {
+        if !matches!(self.phase, GamePhase::Init) {
+            return Err("Game already started".to_owned());
+        }
         let len = self.board.0.len();
         let die = Uniform::from(0..len);
         for (k, player) in &mut self.players {
+            player.lives = 3;
+            player.moves = 1;
             let mut res = false;
             while res == false {
                 let x = die.sample(rnd);
@@ -128,18 +134,33 @@ impl Game {
                         }
                         Ok(())
                     })
-                    .expect("bad indexing");
+                    .expect("you misunderstood Distribution.sample");
             }
         }
         self.phase = GamePhase::InProg;
-        Ok("ok".to_owned())
+        self.turn_end_unix = from_now(self.turn_time_secs);
+        Ok(())
     }
 
-    // pub fn set_turn_time(&mut self, new_time: u32) -> Result<(), String> {
-    //     if new_time > 0 && matches!(self.phase, GamePhase::Init) {
-    //         self.turn_time_secs = new_time;
-    //         return Ok(());
-    //     }
-    //     Err("cannot change turn time".to_owned())
-    // }
+    pub fn replenish(&mut self) -> Result<(), String> {
+        if !matches!(self.phase, GamePhase::InProg) {
+            return Err("Game not in progress".to_owned());
+        }
+        for player in self.players.values_mut() {
+            if player.lives > 0 {
+                player.moves += 1;
+            }
+        }
+        self.turn_end_unix = from_now(self.turn_time_secs);
+        Ok(())
+    }
+}
+
+fn from_now(to_secs: u64) -> u64 {
+    let start = SystemTime::now();
+    let since_the_epoch = start
+        .duration_since(UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+    since_the_epoch + to_secs
 }

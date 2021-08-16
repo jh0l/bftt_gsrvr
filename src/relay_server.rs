@@ -7,7 +7,7 @@ use serde_json::from_slice;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::game::GamePhase;
+use crate::game::Player;
 use crate::{common::Identity, game::Game};
 
 /// server sends this message to session
@@ -56,39 +56,35 @@ pub struct Disconnect {
 }
 
 /// Host a game, if already exists throw error
-#[derive(Clone, Debug)]
+#[derive(Message, Clone, Debug)]
+#[rtype(result = "Result<(), String>")]
 pub struct HostGame {
     pub host_user_id: String,
     pub game_id: String,
 }
-impl actix::Message for HostGame {
-    type Result = Result<(), String>;
-}
 
 /// Join game, if non-existant throw error
-#[derive(Clone, Debug)]
+#[derive(Message, Clone, Debug)]
+#[rtype(result = "Result<(), String>")]
 pub struct JoinGame {
-    /// session id of joiner
+    /// user id of joiner
     pub user_id: String,
-    /// publisher id
     pub game_id: String,
-}
-
-impl actix::Message for JoinGame {
-    type Result = Result<(), String>;
 }
 
 /// Start game, if non-existant throw error
-#[derive(Clone, Debug)]
+#[derive(Message, Clone, Debug)]
+#[rtype(result = "Result<(), String>")]
 pub struct StartGame {
-    /// session id of joiner
+    /// user id of joiner
     pub user_id: String,
-    /// publisher id
     pub game_id: String,
 }
 
-impl actix::Message for StartGame {
-    type Result = Result<(), String>;
+#[derive(Message, Clone, Debug)]
+#[rtype(result = "Result<(), String>")]
+pub struct Replenish {
+    pub game_id: String,
 }
 
 /// `RelayServer` manages users and games
@@ -104,6 +100,19 @@ pub struct RelayServer {
 fn do_send_log(addr: &actix::Recipient<Message>, message: &str) {
     if let Err(err) = addr.do_send(Message(message.to_owned())) {
         println!("[srv/m] do_send error: {:?}", err)
+    }
+}
+
+pub fn send_all(
+    msg: String,
+    keys: std::collections::hash_map::Keys<'_, std::string::String, Player>,
+    sessions: &HashMap<String, Recipient<Message>>,
+) {
+    for k in keys {
+        if let Some(session) = sessions.get(k) {
+            let json = msg.clone();
+            do_send_log(session, &json);
+        }
     }
 }
 
@@ -129,7 +138,7 @@ impl RelayServer {
 /// Creates new user if none exists, setting password and session address
 impl Handler<Connect> for RelayServer {
     type Result = MessageResult<Connect>;
-
+    #[allow(unused_variables)]
     fn handle(&mut self, msg: Connect, _: &mut Context<Self>) -> Self::Result {
         dbg!(msg.clone());
         let User { user_id, password } = msg.user.clone();
@@ -150,8 +159,8 @@ impl Handler<Connect> for RelayServer {
         }
         if matches!(res, ConnectResult::Success(_)) {
             if let Some(addr) = msg_addr {
-                let res = self.sessions.insert(user_id.clone(), addr);
-                if let Some(addr) = res {
+                let res = self.sessions.insert(user_id.clone(), addr.clone());
+                if let Some(res_addr) = res {
                     do_send_log(&addr, &MsgResult::logout());
                 };
             }
@@ -208,6 +217,22 @@ impl Handler<HostGame> for RelayServer {
         MessageResult(res)
     }
 }
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+enum MoveType {
+    Attack,
+    Move,
+    Give,
+    Hover,
+}
+#[derive(Debug, Clone, Serialize)]
+struct PlayerMove {
+    user_id: String,
+    x: u64,
+    y: u64,
+    action: MoveType,
+}
 
 impl Handler<JoinGame> for RelayServer {
     type Result = MessageResult<JoinGame>;
@@ -242,7 +267,7 @@ impl Handler<JoinGame> for RelayServer {
 
 impl Handler<StartGame> for RelayServer {
     type Result = MessageResult<StartGame>;
-    fn handle(&mut self, msg: StartGame, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: StartGame, ctx: &mut Context<Self>) -> Self::Result {
         let StartGame { game_id, user_id } = msg;
         let sessions = &self.sessions;
         let rng = &mut self.rng;
@@ -254,20 +279,46 @@ impl Handler<StartGame> for RelayServer {
                 if game.host_user_id != Some(user_id.clone()) {
                     return Err("Only host can start game".to_owned());
                 }
-                if !matches!(game.phase, GamePhase::Init) {
-                    return Err("Game already started".to_owned());
-                }
                 game.start_game(rng)
                     .map(|_| (MsgResult::start_game(&game), game))
             })
             .and_then(|(msg_result, game)| {
-                let msg_str = msg_result?;
-                for k in game.players.keys() {
-                    if let Some(session) = sessions.get(k) {
-                        let json = msg_str.clone();
-                        do_send_log(session, &json);
-                    }
-                }
+                let json = msg_result?;
+                send_all(json, game.players.keys(), sessions);
+                ctx.notify_later(
+                    Replenish {
+                        game_id: game.game_id.clone(),
+                    },
+                    Duration::from_secs(game.turn_time_secs),
+                );
+                Ok(())
+            });
+        MessageResult(res)
+    }
+}
+
+impl Handler<Replenish> for RelayServer {
+    type Result = MessageResult<Replenish>;
+    fn handle(&mut self, msg: Replenish, ctx: &mut Context<Self>) -> Self::Result {
+        let Replenish { game_id } = msg;
+        let sessions = &self.sessions;
+        let res = self
+            .games
+            .get_mut(&game_id)
+            .ok_or("Game not found".to_owned())
+            .and_then(|game| {
+                game.replenish()
+                    .map(|_| (MsgResult::replenish(&game), game))
+            })
+            .and_then(|(json_res, game)| {
+                let json = json_res?;
+                send_all(json, game.players.keys(), sessions);
+                ctx.notify_later(
+                    Replenish {
+                        game_id: game.game_id.clone(),
+                    },
+                    Duration::from_secs(game.turn_time_secs as u64),
+                );
                 Ok(())
             });
         MessageResult(res)
@@ -525,14 +576,21 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
 struct MsgResult;
 
 impl MsgResult {
+    fn json_string<V>(value: &V, cmd: &str) -> Result<String, String>
+    where
+        V: Serialize,
+    {
+        serde_json::to_string(value)
+            .and_then(|json| Ok(format!("{} {}", cmd, json)))
+            .or_else(|err| Err(format!("{:?}", err)))
+    }
+
     pub fn logout() -> String {
         "/logout new login elsewhere".to_string()
     }
 
     pub fn host_game(game: &Game) -> Result<String, String> {
-        serde_json::to_string(game)
-            .and_then(|json| Ok(format!("/host_game_success {}", json)))
-            .or_else(|err| Err(format!("{:?}", err)))
+        MsgResult::json_string(game, "/host_game_success")
     }
 
     pub fn join_game(json: String) -> String {
@@ -544,9 +602,11 @@ impl MsgResult {
     }
 
     pub fn start_game(game: &Game) -> Result<String, String> {
-        serde_json::to_string(game)
-            .and_then(|json| Ok(format!("/start_game {}", json)))
-            .or_else(|err| Err(format!("{:?}", err)))
+        MsgResult::json_string(game, "/start_game")
+    }
+
+    pub fn replenish(game: &Game) -> Result<String, String> {
+        MsgResult::json_string(game, "/replenish")
     }
 }
 

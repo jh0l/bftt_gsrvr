@@ -137,7 +137,7 @@ async fn main() -> std::io::Result<()> {
             .data(relay.clone())
             .service(resource("/").route(get().to(index)))
             .service(resource("/login").route(post().to(login)))
-            .service(resource("/logout").route(post().to(logout)))
+            .service(resource("/logout").route(get().to(logout)))
             .service(resource("/ws/").to(ws_route))
         // .configure(services::config)
     })
