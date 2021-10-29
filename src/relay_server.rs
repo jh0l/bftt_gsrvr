@@ -158,12 +158,12 @@ impl Handler<Connect> for RelayServer {
             }
         }
         if matches!(res, ConnectResult::Success(_)) {
-            if let Some(addr) = msg_addr {
-                let res = self.sessions.insert(user_id.clone(), addr.clone());
-                if let Some(res_addr) = res {
-                    do_send_log(&addr, &MsgResult::logout());
-                };
-            }
+            let addr = msg_addr.expect("no address found on Recipient Message");
+            let res = self.sessions.insert(user_id.clone(), addr.clone());
+            if let Some(res_addr) = res {
+                do_send_log(&res_addr, &MsgResult::logout());
+                do_send_log(&addr, &MsgResult::alert("old_session_dropped".to_string()));
+            };
         }
         dbg!(res.clone());
         return MessageResult(res);
@@ -607,6 +607,10 @@ impl MsgResult {
 
     pub fn replenish(game: &Game) -> Result<String, String> {
         MsgResult::json_string(game, "/replenish")
+    }
+
+    pub fn alert(msg: String) -> String {
+        format!("/alert {}", msg).to_string()
     }
 }
 
