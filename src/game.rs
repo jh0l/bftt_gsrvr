@@ -16,6 +16,7 @@ pub struct Player {
     pub lives: u32,
     pub moves: u32,
     pub pos: Pos,
+    pub range: u16,
 }
 
 impl Player {
@@ -25,6 +26,7 @@ impl Player {
             lives: 0,
             moves: 0,
             pos: Pos { x: 0, y: 0 },
+            range: 2,
         }
     }
 }
@@ -81,6 +83,12 @@ pub struct Game {
     pub turn_end_unix: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct GamePlayers {
+    pub game_id: String,
+    pub players: HashMap<String, Player>,
+}
+
 impl Game {
     pub fn new(game_id: String, size: u16) -> Game {
         Game {
@@ -94,10 +102,9 @@ impl Game {
         }
     }
 
-    pub fn set_host(mut self, host_id: String) -> Self {
+    pub fn set_host(&mut self, host_id: String) -> Result<String, String> {
         self.host_user_id = Some(host_id.clone());
-        self.insert_player(host_id).expect("setting host");
-        self
+        self.insert_player(host_id)
     }
 
     pub fn insert_player(&mut self, user_id: String) -> Result<String, String> {
@@ -134,7 +141,7 @@ impl Game {
                         }
                         Ok(())
                     })
-                    .expect("you misunderstood Distribution.sample");
+                    .map_err(|_| "bad Distribution sample index")?;
             }
         }
         self.phase = GamePhase::InProg;
@@ -142,7 +149,7 @@ impl Game {
         Ok(())
     }
 
-    pub fn replenish(&mut self) -> Result<(), String> {
+    pub fn replenish(&mut self) -> Result<GamePlayers, String> {
         if !matches!(self.phase, GamePhase::InProg) {
             return Err("Game not in progress".to_owned());
         }
@@ -152,7 +159,10 @@ impl Game {
             }
         }
         self.turn_end_unix = from_now(self.turn_time_secs);
-        Ok(())
+        Ok(GamePlayers {
+            game_id: self.game_id.clone(),
+            players: self.players.to_owned(),
+        })
     }
 }
 

@@ -1,3 +1,5 @@
+use crate::game::{GamePlayers, Player};
+use crate::{common::Identity, game::Game};
 use actix::prelude::*;
 use actix_web::{web, Error, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
@@ -6,9 +8,7 @@ use serde::Deserialize;
 use serde_json::from_slice;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-
-use crate::game::Player;
-use crate::{common::Identity, game::Game};
+use ws::WebsocketContext as WSCtx;
 
 /// server sends this message to session
 #[derive(Message, Debug)]
@@ -142,7 +142,6 @@ impl Handler<Connect> for RelayServer {
     fn handle(&mut self, msg: Connect, _: &mut Context<Self>) -> Self::Result {
         dbg!(msg.clone());
         let User { user_id, password } = msg.user.clone();
-        let msg_addr = msg.addr;
         let res;
         match self.users.get(&user_id) {
             Some(existant) => {
@@ -157,12 +156,15 @@ impl Handler<Connect> for RelayServer {
                 res = ConnectResult::Success(Success::New);
             }
         }
-        if matches!(res, ConnectResult::Success(_)) {
-            let addr = msg_addr.expect("no address found on Recipient Message");
+
+        // The HTTP GET:login endpoint uses Connect {} to log in the user
+        // There is no socket in that case so msg.addr has to be None
+        if matches!(res, ConnectResult::Success(_)) && msg.addr.is_some() {
+            let addr = msg.addr.expect("no address in msg");
             let res = self.sessions.insert(user_id.clone(), addr.clone());
             if let Some(res_addr) = res {
                 do_send_log(&res_addr, &MsgResult::logout());
-                do_send_log(&addr, &MsgResult::alert("old_session_dropped".to_string()));
+                do_send_log(&addr, &MsgResult::alert("old session dropped".to_string()));
             };
         }
         dbg!(res.clone());
@@ -202,23 +204,34 @@ impl Handler<HostGame> for RelayServer {
                 return MessageResult(Err(format!("{} exists", game_id).to_owned()));
             }
         }
+        let mut new_game = false;
         if res_game.is_none() {
-            let game = Game::new(game_id.clone(), 18).set_host(host_user_id.clone());
+            let mut game = Game::new(game_id.clone(), 18);
+            let host_op = game.set_host(host_user_id.clone()).map(|_| ());
+            if host_op.is_err() {
+                return MessageResult(host_op);
+            }
             self.games.insert(game_id.clone(), game.clone());
             res_game = Some(game);
+            new_game = true;
         }
-        let res = MsgResult::host_game(&res_game.unwrap())
+        let res = MsgResult::host_game(&res_game.expect("res_game is handled"))
             .map(|msg_result| {
                 if let Some(session) = self.sessions.get(&host_user_id) {
                     do_send_log(session, &msg_result);
+                    if new_game {
+                        do_send_log(session, &MsgResult::alert("new game created".to_string()));
+                    } else {
+                        do_send_log(session, &MsgResult::alert("rejoined game".to_string()));
+                    }
                 }
             })
             .map_err(|e| format!("{:?}", e).to_owned());
         MessageResult(res)
     }
 }
-use serde::Serialize;
 
+use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 enum MoveType {
     Attack,
@@ -308,7 +321,7 @@ impl Handler<Replenish> for RelayServer {
             .ok_or("Game not found".to_owned())
             .and_then(|game| {
                 game.replenish()
-                    .map(|_| (MsgResult::replenish(&game), game))
+                    .map(|game_players| (MsgResult::replenish(&game_players), game))
             })
             .and_then(|(json_res, game)| {
                 let json = json_res?;
@@ -348,7 +361,7 @@ where
 impl WsSession {
     // helper method that sends intermittent ping to client
     // also checks ws client heartbeat and terminates session on timeout
-    fn hb(&self, ctx: &mut ws::WebsocketContext<Self>) {
+    fn hb(&self, ctx: &mut WSCtx<Self>) {
         ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
             // check client hearbeats
             if Instant::now().duration_since(act.hb) > CLIENT_TIMEOUT {
@@ -368,23 +381,20 @@ impl WsSession {
     fn mailbox_check<M>(
         &mut self,
         msg: Result<M, MailboxError>,
-        ctx: &mut ws::WebsocketContext<Self>,
+        ctx: &mut WSCtx<Self>,
     ) -> Result<M, ()> {
         match msg {
             Ok(m) => Ok(m),
             Err(e) => {
-                ctx.text("/error mailbox error");
+                ctx.text(MsgResult::error("mailbox error"));
                 dbg!(e);
                 Err(())
             }
         }
     }
 
-    fn relay_connect(
-        &mut self,
-        id: Identity,
-        ctx: &mut ws::WebsocketContext<Self>,
-    ) -> Result<(), String> {
+    fn relay_connect(&mut self, msg: String, ctx: &mut WSCtx<Self>) -> Result<(), String> {
+        let id = from_json::<Identity>(&msg)?;
         let addr = ctx.address().recipient();
         let user_id = id.user_id.clone();
         self.server_addr
@@ -401,14 +411,11 @@ impl WsSession {
                 if let Ok(res) = res {
                     match res {
                         ConnectResult::Fail(_) => {
-                            ctx.text("/error FailPassword");
+                            ctx.text(MsgResult::error("FailPassword"));
                         }
                         ConnectResult::Success(s) => {
                             act.user_id = Some(user_id);
-                            match s {
-                                Success::Exists => ctx.text("/login Exists"),
-                                Success::New => ctx.text("/login New"),
-                            }
+                            ctx.text(MsgResult::login(s));
                         }
                     }
                 }
@@ -418,20 +425,24 @@ impl WsSession {
         Ok(())
     }
 
-    fn host_game(&self, game_id: &str, ctx: &mut ws::WebsocketContext<Self>) -> Result<(), String> {
-        if self.user_id.is_none() {
-            return Err("user not logged in".to_owned());
-        }
+    fn clone_user_id(&self) -> Result<String, String> {
+        self.user_id
+            .clone()
+            .ok_or_else(|| "user not logged in".to_string())
+    }
+
+    fn host_game(&self, game_id: String, ctx: &mut WSCtx<Self>) -> Result<(), String> {
+        let host_user_id = self.clone_user_id()?;
         self.server_addr
             .send(HostGame {
-                game_id: game_id.to_owned(),
-                host_user_id: self.user_id.clone().unwrap(),
+                game_id,
+                host_user_id,
             })
             .into_actor(self)
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     if let Err(msg) = res {
-                        ctx.text(format!("/error {:?}", msg));
+                        ctx.text(MsgResult::error(msg.as_str()));
                     }
                 }
                 fut::ready(())
@@ -440,20 +451,15 @@ impl WsSession {
         Ok(())
     }
 
-    fn join_game(&self, game_id: &str, ctx: &mut ws::WebsocketContext<Self>) -> Result<(), String> {
-        if self.user_id.is_none() {
-            return Err("user not logged in".to_owned());
-        }
+    fn join_game(&self, game_id: String, ctx: &mut WSCtx<Self>) -> Result<(), String> {
+        let user_id = self.clone_user_id()?;
         self.server_addr
-            .send(JoinGame {
-                game_id: game_id.to_owned(),
-                user_id: self.user_id.clone().unwrap(),
-            })
+            .send(JoinGame { game_id, user_id })
             .into_actor(self)
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     if let Err(msg) = res {
-                        ctx.text(format!("/error {:?}", msg));
+                        ctx.text(MsgResult::error(msg.as_str()));
                     }
                 }
                 fut::ready(())
@@ -462,24 +468,16 @@ impl WsSession {
         Ok(())
     }
 
-    fn start_game(
-        &self,
-        game_id: &str,
-        ctx: &mut ws::WebsocketContext<Self>,
-    ) -> Result<(), String> {
-        if self.user_id.is_none() {
-            return Err("user not logged in".to_owned());
-        }
+    fn start_game(&self, game_id: String, ctx: &mut WSCtx<Self>) -> Result<(), String> {
+        let user_id = self.clone_user_id()?;
+
         self.server_addr
-            .send(StartGame {
-                game_id: game_id.to_owned(),
-                user_id: self.user_id.clone().unwrap(),
-            })
+            .send(StartGame { game_id, user_id })
             .into_actor(self)
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     if let Err(msg) = res {
-                        ctx.text(format!("/error {:?}", msg));
+                        ctx.text(MsgResult::error(msg.as_str()));
                     }
                 }
                 fut::ready(())
@@ -488,30 +486,26 @@ impl WsSession {
         Ok(())
     }
 
-    fn parse_message(
-        &mut self,
-        text: &str,
-        ctx: &mut ws::WebsocketContext<Self>,
-    ) -> Result<(), String> {
+    fn parse_message(&mut self, text: &str, ctx: &mut WSCtx<Self>) -> Result<(), String> {
         let m = text.trim();
         let v: Vec<&str> = m.splitn(2, ' ').collect();
         if v.len() < 2 {
             return Err("empty request".to_owned());
         }
         let cmd = v[0];
-        let msg = v[1];
+        let msg = v[1].clone().to_string();
         match cmd {
-            "/login" => self.relay_connect(from_json::<Identity>(&msg)?, ctx),
-            "/host_game" => self.host_game(&msg, ctx),
-            "/join_game" => self.join_game(&msg, ctx),
-            "/start_game" => self.start_game(&msg, ctx),
+            "/login" => self.relay_connect(msg, ctx),
+            "/host_game" => self.host_game(msg, ctx),
+            "/join_game" => self.join_game(msg, ctx),
+            "/start_game" => self.start_game(msg, ctx),
             _ => Err(format!("unknown command type {:?}", m).to_owned()),
         }
     }
 }
 
 impl Actor for WsSession {
-    type Context = ws::WebsocketContext<Self>;
+    type Context = WSCtx<Self>;
 
     // Method is called on actor start
     // register ws session with RelayServer
@@ -559,7 +553,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
             ws::Message::Pong(_) => self.hb = Instant::now(),
             ws::Message::Text(text) => {
                 self.parse_message(&text, ctx).unwrap_or_else(|err| {
-                    ctx.text(&format!("/error {:?}", err));
+                    ctx.text(MsgResult::error(err.as_str()));
                 });
             }
             ws::Message::Binary(_) => println!("[srv/s] Unexpected binary"),
@@ -585,8 +579,12 @@ impl MsgResult {
             .or_else(|err| Err(format!("{:?}", err)))
     }
 
+    pub fn login(msg: Success) -> String {
+        format!("/login {:?}", msg).to_string()
+    }
+
     pub fn logout() -> String {
-        "/logout new login elsewhere".to_string()
+        "/logout".to_string()
     }
 
     pub fn host_game(game: &Game) -> Result<String, String> {
@@ -605,8 +603,12 @@ impl MsgResult {
         MsgResult::json_string(game, "/start_game")
     }
 
-    pub fn replenish(game: &Game) -> Result<String, String> {
-        MsgResult::json_string(game, "/replenish")
+    pub fn replenish(game_players: &GamePlayers) -> Result<String, String> {
+        MsgResult::json_string(game_players, "/replenish")
+    }
+
+    pub fn error(msg: &str) -> String {
+        format!("/error {}", msg).to_string()
     }
 
     pub fn alert(msg: String) -> String {
