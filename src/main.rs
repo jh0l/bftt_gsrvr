@@ -12,11 +12,12 @@ use actix_web::{
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::relay_server::ws_route;
+use crate::ws_session::ws_route;
 
 mod common;
 mod game;
 mod relay_server;
+mod ws_session;
 
 use common::Identity;
 
@@ -59,13 +60,7 @@ async fn login(
             session.set("user_id", &user_id)?;
             session.set("token", &password)?;
             session.renew();
-            let msg = Some(
-                match s {
-                    relay_server::Success::Exists => "Exists",
-                    relay_server::Success::New => "New",
-                }
-                .to_owned(),
-            );
+            let msg = Some(format!("{:?}", s));
             Ok(HttpResponse::Ok().json(IndexResponse {
                 user_id: Some(user_id),
                 msg,
