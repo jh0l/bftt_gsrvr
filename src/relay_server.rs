@@ -172,7 +172,9 @@ impl Handler<Connect> for RelayServer {
                 let addr = msg.addr.expect("no address in msg");
                 let old_sesh = self.sessions.insert(user_id.clone(), addr.clone());
                 if let Some(res_addr) = old_sesh {
-                    do_send_log(&res_addr, MsgResult::logout());
+                    if res_addr != addr {
+                        do_send_log(&res_addr, MsgResult::logout("Connect"));
+                    }
                 };
                 // new session key used for determining newest authorized session of user
                 let key = gen_rng_string(16);
@@ -194,20 +196,22 @@ impl Handler<VerifySession> for RelayServer {
     fn handle(&mut self, msg: VerifySession, _: &mut Context<Self>) {
         let user_id_opt = msg.user_id;
         if let Some(user_id) = user_id_opt {
-            if let Some(token) = self.session_keys(&user_id) {
-                if token == msg.token {
-                    // user must have user_id and valid session token to not be logged out
+            if let Some(sesh_key) = self.session_keys.get(&user_id) {
+                if sesh_key == &msg.token {
+                    // user must have user_id and valid session token for session to verify
                     if let Some(addr) = self.sessions.get(&user_id) {
                         if addr == &msg.addr {
                             return;
                         }
                     }
-                    // if user's session is untracked, replace self.sessions[user_id] with it
+                    do_send_log(&msg.addr, MsgResult::alert("new session".to_string()));
+                    // if user's session is untracked and session key is verified, replace self.sessions[user_id] with it
                     self.sessions.insert(user_id.clone(), msg.addr.clone());
+                    return;
                 }
             }
         }
-        do_send_log(&msg.addr, MsgResult::logout());
+        do_send_log(&msg.addr, MsgResult::logout("VerifySession"));
     }
 }
 

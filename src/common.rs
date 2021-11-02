@@ -37,8 +37,8 @@ impl MsgResult {
         MsgResult::json_string(msg, "/login")
     }
 
-    pub fn logout() -> String {
-        "/logout".to_string()
+    pub fn logout(msg: &str) -> String {
+        format!("/logout {}", msg).to_string()
     }
 
     pub fn host_game(game: &Game) -> Result<String, String> {
