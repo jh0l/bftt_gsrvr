@@ -9,10 +9,9 @@ use actix_web::{
     App, HttpResponse, HttpServer, Result,
 };
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::ws_session::ws_route;
+use crate::{common::gen_rng_string, ws_session::ws_route};
 
 mod common;
 mod game;
@@ -60,10 +59,9 @@ async fn login(
             session.set("user_id", &user_id)?;
             session.set("token", &password)?;
             session.renew();
-            let msg = Some(format!("{:?}", s));
             Ok(HttpResponse::Ok().json(IndexResponse {
                 user_id: Some(user_id),
-                msg,
+                msg: Some(s.alert),
             }))
         }
     }
@@ -85,19 +83,8 @@ fn get_p_key() -> Vec<u8> {
         let b = key.into_bytes();
         return b;
     }
-    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
-                                abcdefghijklmnopqrstuvwxyz\
-                                0123456789)(*&^%$#@!~";
     const PASSWORD_LEN: usize = 64;
-    let mut rng = rand::thread_rng();
-
-    let password: String = (0..PASSWORD_LEN)
-        .map(|_| {
-            let idx = rng.gen_range(0, CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect();
-
+    let password = gen_rng_string(PASSWORD_LEN);
     println!("{:?}", password);
     panic!("set PRIVATE_KEY in .env e.g {}", password);
 }

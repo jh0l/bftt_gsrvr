@@ -90,7 +90,7 @@ impl WsSession {
                         }
                         ConnectResult::Success(s) => {
                             act.user_id = Some(user_id);
-                            ctx.text(MsgResult::login(s.to_string()));
+                            ctx.text(MsgResult::login(&s).unwrap_or_else(|e| MsgResult::error(&e)));
                         }
                     }
                 }
@@ -100,11 +100,12 @@ impl WsSession {
         Ok(())
     }
 
-    fn verify_session(&mut self, ctx: &mut WSctx<Self>) -> Result<(), String> {
+    fn verify_session(&mut self, token: String, ctx: &mut WSctx<Self>) -> Result<(), String> {
         self.server_addr
             .send(VerifySession {
                 user_id: self.user_id.clone(),
                 addr: ctx.address().recipient(),
+                token,
             })
             .into_actor(self)
             .then(|_, _, _| fut::ready(()))
@@ -183,7 +184,7 @@ impl WsSession {
         }
         match *cmd {
             "/login" => self.relay_connect(msg, ctx),
-            "/verify" => self.verify_session(ctx),
+            "/verify" => self.verify_session(msg, ctx),
             "/host_game" => self.host_game(msg, ctx),
             "/join_game" => self.join_game(msg, ctx),
             "/start_game" => self.start_game(msg, ctx),

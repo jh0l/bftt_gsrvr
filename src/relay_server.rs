@@ -1,6 +1,7 @@
+use crate::common::gen_rng_string;
 use crate::common::Fail;
 use crate::common::MsgResult;
-use crate::common::Success;
+use crate::common::SuccessResult;
 use crate::game::Game;
 use crate::game::Player;
 use actix::prelude::*;
@@ -21,7 +22,7 @@ pub struct User {
 
 #[derive(Clone, Debug)]
 pub enum ConnectResult {
-    Success(Success),
+    Success(SuccessResult),
     Fail(Fail),
 }
 
@@ -41,6 +42,7 @@ impl actix::Message for Connect {
 pub struct VerifySession {
     pub user_id: Option<String>,
     pub addr: Recipient<Message>,
+    pub token: String,
 }
 
 /// Session is disconnected
@@ -85,9 +87,11 @@ pub struct Replenish {
 /// `RelayServer` manages users and games
 /// relays user requests to games
 /// relays game events to users
+/// handles dead sessions and verifying new sessions
 pub struct RelayServer {
     users: HashMap<String, User>,
     sessions: HashMap<String, Recipient<Message>>,
+    session_keys: HashMap<String, String>,
     games: HashMap<String, Game>,
     rng: ThreadRng,
 }
@@ -122,6 +126,7 @@ impl RelayServer {
         RelayServer {
             users: HashMap::new(),
             sessions: HashMap::new(),
+            session_keys: HashMap::new(),
             games: HashMap::new(),
             rng: rand::thread_rng(),
         }
@@ -131,59 +136,74 @@ impl RelayServer {
 /// Checks if user exists, if so success if passwords match else fails
 /// replaces current session address
 /// Creates new user if none exists, setting password and session address
+/// If Address included, creates a new session key that handles updating sessions
 impl Handler<Connect> for RelayServer {
     type Result = MessageResult<Connect>;
     #[allow(unused_variables)]
     fn handle(&mut self, msg: Connect, _: &mut Context<Self>) -> Self::Result {
         dbg!(msg.clone());
         let User { user_id, password } = msg.user.clone();
-        let res;
+        let mut res;
         match self.users.get(&user_id) {
             Some(existant) => {
                 if existant.password == password {
-                    res = ConnectResult::Success(Success::Exists);
+                    res = ConnectResult::Success(SuccessResult {
+                        alert: "user exists".to_string(),
+                        token: None,
+                    });
                 } else {
                     res = ConnectResult::Fail(Fail::Password);
                 }
             }
             None => {
                 self.users.insert(user_id.clone(), msg.user);
-                res = ConnectResult::Success(Success::New);
+                res = ConnectResult::Success(SuccessResult {
+                    alert: "user created".to_string(),
+                    token: None,
+                });
             }
         }
 
         // The HTTP GET:login endpoint uses Connect {} to log in the user
         // There is no socket in that case so msg.addr has to be None
         dbg!(msg.addr.clone());
-        if matches!(res, ConnectResult::Success(_)) && msg.addr.is_some() {
-            let addr = msg.addr.expect("no address in msg");
-            let res = self.sessions.insert(user_id.clone(), addr.clone());
-            dbg!(user_id.clone(), addr.clone(), res.clone());
-            if let Some(res_addr) = res {
-                do_send_log(
-                    &res_addr,
-                    MsgResult::alert("detected duplicate session, please log back in".to_string()),
-                );
-                do_send_log(&res_addr, MsgResult::logout());
-                do_send_log(
-                    &addr,
-                    MsgResult::alert("detected duplicate session, please log back in".to_string()),
-                );
-            };
+        if let ConnectResult::Success(ref mut succ_res) = res {
+            if msg.addr.is_some() {
+                let addr = msg.addr.expect("no address in msg");
+                let old_sesh = self.sessions.insert(user_id.clone(), addr.clone());
+                if let Some(res_addr) = old_sesh {
+                    do_send_log(&res_addr, MsgResult::logout());
+                };
+                // new session key used for determining newest authorized session of user
+                let key = gen_rng_string(16);
+                succ_res.token = Some(key.clone());
+                self.session_keys.insert(user_id.clone(), key);
+            }
         }
         dbg!(res.clone());
         return MessageResult(res);
     }
 }
 
+/// session key will determine if a conflicting session verifying will logout
+/// or replace an existing session
+/// TODO recover messages missed transitioning to new session
+/// TODO add timestamp to each message for clients to differentiate resent messages
 impl Handler<VerifySession> for RelayServer {
     type Result = ();
     fn handle(&mut self, msg: VerifySession, _: &mut Context<Self>) {
         let user_id_opt = msg.user_id;
         if let Some(user_id) = user_id_opt {
-            if let Some(addr) = self.sessions.get(&user_id) {
-                if addr == &msg.addr {
-                    return;
+            if let Some(token) = self.session_keys(&user_id) {
+                if token == msg.token {
+                    // user must have user_id and valid session token to not be logged out
+                    if let Some(addr) = self.sessions.get(&user_id) {
+                        if addr == &msg.addr {
+                            return;
+                        }
+                    }
+                    // if user's session is untracked, replace self.sessions[user_id] with it
+                    self.sessions.insert(user_id.clone(), msg.addr.clone());
                 }
             }
         }
@@ -264,6 +284,7 @@ struct PlayerMove {
     x: u64,
     y: u64,
     action: MoveType,
+    hash: String,
 }
 
 impl Handler<JoinGame> for RelayServer {

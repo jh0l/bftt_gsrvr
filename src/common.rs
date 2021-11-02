@@ -1,4 +1,4 @@
-use core::fmt;
+use rand::Rng;
 
 use serde::{Deserialize, Serialize};
 
@@ -10,16 +10,10 @@ pub struct Identity {
     pub password: String,
 }
 
-#[derive(Clone, Debug)]
-pub enum Success {
-    Exists,
-    New,
-}
-
-impl fmt::Display for Success {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
+#[derive(Clone, Debug, Serialize)]
+pub struct SuccessResult {
+    pub token: Option<String>,
+    pub alert: String,
 }
 
 #[derive(Clone, Debug)]
@@ -39,8 +33,8 @@ impl MsgResult {
             .or_else(|err| Err(format!("{:?}", err)))
     }
 
-    pub fn login(msg: String) -> String {
-        format!("/login {:?}", msg).to_string()
+    pub fn login(msg: &SuccessResult) -> Result<String, String> {
+        MsgResult::json_string(msg, "/login")
     }
 
     pub fn logout() -> String {
@@ -74,4 +68,18 @@ impl MsgResult {
     pub fn alert(msg: String) -> String {
         format!("/alert {}", msg).to_string()
     }
+}
+
+pub fn gen_rng_string(len: usize) -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ\
+    abcdefghijklmnopqrstuvwxyz\
+    0123456789)(*&^%$#@!~";
+    let mut rng = rand::thread_rng();
+
+    (0..len)
+        .map(|_| {
+            let idx = rng.gen_range(0, CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }
