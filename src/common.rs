@@ -2,7 +2,7 @@ use rand::Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::{Game, GamePlayers};
+use crate::game::{Game, GamePlayers, PlayerResponse};
 
 #[derive(Deserialize)]
 pub struct Identity {
@@ -21,10 +21,15 @@ pub enum Fail {
     Password,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct UserStatusResult {
+    pub game_id: Option<String>,
+}
+
 pub struct MsgResult;
 
 impl MsgResult {
-    fn json_string<V>(value: &V, cmd: &str) -> Result<String, String>
+    fn json_string<V>(cmd: &str, value: &V) -> Result<String, String>
     where
         V: Serialize,
     {
@@ -34,7 +39,7 @@ impl MsgResult {
     }
 
     pub fn login(msg: &SuccessResult) -> Result<String, String> {
-        MsgResult::json_string(msg, "/login")
+        MsgResult::json_string("/login", msg)
     }
 
     pub fn logout(msg: &str) -> String {
@@ -42,30 +47,38 @@ impl MsgResult {
     }
 
     pub fn host_game(game: &Game) -> Result<String, String> {
-        MsgResult::json_string(game, "/host_game_success")
+        MsgResult::json_string("/host_game_success", game)
     }
 
-    pub fn join_game(json: String) -> String {
+    pub fn join_game(json: &str) -> String {
         format!("/join_game_success {}", json).to_string()
     }
 
-    pub fn joined(json: String) -> String {
+    pub fn joined(json: &str) -> String {
         format!("/player_joined {}", json).to_string()
     }
 
     pub fn start_game(game: &Game) -> Result<String, String> {
-        MsgResult::json_string(game, "/start_game")
+        MsgResult::json_string("/start_game", game)
+    }
+
+    pub fn user_status(user_status: &UserStatusResult) -> Result<String, String> {
+        MsgResult::json_string("/user_status", user_status)
     }
 
     pub fn replenish(game_players: &GamePlayers) -> Result<String, String> {
-        MsgResult::json_string(game_players, "/replenish")
+        MsgResult::json_string("/replenish", game_players)
+    }
+
+    pub fn player_action(action: &PlayerResponse) -> Result<String, String> {
+        MsgResult::json_string("/player_action", action)
     }
 
     pub fn error(msg: &str) -> String {
         format!("/error {}", msg).to_string()
     }
 
-    pub fn alert(msg: String) -> String {
+    pub fn alert(msg: &str) -> String {
         format!("/alert {}", msg).to_string()
     }
 }

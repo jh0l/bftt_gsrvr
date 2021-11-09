@@ -2,8 +2,12 @@ use crate::common::gen_rng_string;
 use crate::common::Fail;
 use crate::common::MsgResult;
 use crate::common::SuccessResult;
+use crate::common::UserStatusResult;
+use crate::game::ActionType;
 use crate::game::Game;
+use crate::game::InsertPlayerResult;
 use crate::game::Player;
+use crate::game::BOARD_SIZE;
 use actix::prelude::*;
 use rand::prelude::ThreadRng;
 use std::collections::HashMap;
@@ -69,6 +73,8 @@ pub struct JoinGame {
     pub game_id: String,
 }
 
+/// Edit game, if already started, non-existant - throw error
+
 /// Start game, if non-existant throw error
 #[derive(Message, Clone, Debug)]
 #[rtype(result = "Result<(), String>")]
@@ -76,6 +82,21 @@ pub struct StartGame {
     /// user id of joiner
     pub user_id: String,
     pub game_id: String,
+}
+
+/// check if user has a game in progress they should know about
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct UserStatus {
+    pub user_id: String,
+}
+
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct PlayerActionRequest {
+    pub user_id: String,
+    pub game_id: String,
+    pub action: ActionType,
 }
 
 #[derive(Message, Clone, Debug)]
@@ -89,28 +110,36 @@ pub struct Replenish {
 /// relays game events to users
 /// handles dead sessions and verifying new sessions
 pub struct RelayServer {
+    /// map of User IDs to corresponding user
     users: HashMap<String, User>,
+    /// map of user IDs to the ID of game they're currently in
+    user_games: HashMap<String, String>,
+    /// map of User IDs to corresponding client session
     sessions: HashMap<String, Recipient<Message>>,
+    /// map of User IDs to corresponding session key for session verification
     session_keys: HashMap<String, String>,
+    /// map of Game IDs to corresponding game
     games: HashMap<String, Game>,
+    /// random number generator
     rng: ThreadRng,
 }
 
 fn do_send_log(addr: &actix::Recipient<Message>, message: String) {
     if let Err(err) = addr.do_send(Message(message)) {
         println!("[srv/m] do_send error: {:?}", err)
+        // TODO send errors to logging record
     }
 }
 
 pub fn send_all(
-    msg: String,
+    msg: &str,
     keys: std::collections::hash_map::Keys<'_, std::string::String, Player>,
     sessions: &HashMap<String, Recipient<Message>>,
 ) {
     for k in keys {
         if let Some(session) = sessions.get(k) {
             let json = msg.clone();
-            do_send_log(session, json);
+            do_send_log(session, json.to_string());
         }
     }
 }
@@ -125,10 +154,16 @@ impl RelayServer {
     pub fn new() -> RelayServer {
         RelayServer {
             users: HashMap::new(),
+            user_games: HashMap::new(),
             sessions: HashMap::new(),
             session_keys: HashMap::new(),
             games: HashMap::new(),
             rng: rand::thread_rng(),
+        }
+    }
+    pub fn user_do_send_log(&self, user_id: &str, msg: &str) {
+        if let Some(session) = self.sessions.get(user_id) {
+            do_send_log(session, msg.to_string());
         }
     }
 }
@@ -143,26 +178,25 @@ impl Handler<Connect> for RelayServer {
     fn handle(&mut self, msg: Connect, _: &mut Context<Self>) -> Self::Result {
         dbg!(msg.clone());
         let User { user_id, password } = msg.user.clone();
-        let mut res;
-        match self.users.get(&user_id) {
+        let mut res = match self.users.get(&user_id) {
             Some(existant) => {
                 if existant.password == password {
-                    res = ConnectResult::Success(SuccessResult {
+                    ConnectResult::Success(SuccessResult {
                         alert: "user exists".to_string(),
                         token: None,
-                    });
+                    })
                 } else {
-                    res = ConnectResult::Fail(Fail::Password);
+                    ConnectResult::Fail(Fail::Password)
                 }
             }
             None => {
                 self.users.insert(user_id.clone(), msg.user);
-                res = ConnectResult::Success(SuccessResult {
+                ConnectResult::Success(SuccessResult {
                     alert: "user created".to_string(),
                     token: None,
-                });
+                })
             }
-        }
+        };
 
         // The HTTP GET:login endpoint uses Connect {} to log in the user
         // There is no socket in that case so msg.addr has to be None
@@ -177,7 +211,7 @@ impl Handler<Connect> for RelayServer {
                     }
                 };
                 // new session key used for determining newest authorized session of user
-                let key = gen_rng_string(16);
+                let key = gen_rng_string(4);
                 succ_res.token = Some(key.clone());
                 self.session_keys.insert(user_id.clone(), key);
             }
@@ -204,7 +238,7 @@ impl Handler<VerifySession> for RelayServer {
                             return;
                         }
                     }
-                    do_send_log(&msg.addr, MsgResult::alert("new session".to_string()));
+                    do_send_log(&msg.addr, MsgResult::alert("new session"));
                     // if user's session is untracked and session key is verified, replace self.sessions[user_id] with it
                     self.sessions.insert(user_id.clone(), msg.addr.clone());
                     return;
@@ -239,33 +273,46 @@ impl Handler<HostGame> for RelayServer {
             host_user_id,
         } = msg;
         let mut res_game = None;
+        // return game if user is host of game or err if other user is host
         if let Some(game) = self.games.get(&game_id) {
-            // return game if user is already host of the game
             if game.host_user_id == Some(host_user_id.clone()) {
                 res_game = Some(game.clone());
             } else {
                 return MessageResult(Err(format!("{} exists", game_id).to_owned()));
             }
         }
+        // ELSE return err if user is already in another game
+        else if let Some(game_id) = self.user_games.get(&host_user_id) {
+            if let Some(game) = self.games.get(game_id) {
+                if game.host_user_id == Some(host_user_id.clone()) {
+                    return MessageResult(Err("already in another game".to_string()));
+                }
+            }
+            dbg!("user game outdated", host_user_id.clone(), game_id);
+            // TODO user is not actually host of game then ignore user_games?
+        }
         let mut new_game = false;
+        // create game and set user as host and track in user_games, return err if host op failed
         if res_game.is_none() {
-            let mut game = Game::new(game_id.clone(), 18);
+            let mut game = Game::new(game_id.clone(), BOARD_SIZE);
             let host_op = game.set_host(host_user_id.clone()).map(|_| ());
             if host_op.is_err() {
                 return MessageResult(host_op);
             }
             self.games.insert(game_id.clone(), game.clone());
+            self.user_games.insert(host_user_id.clone(), game_id);
             res_game = Some(game);
             new_game = true;
         }
+        // send json response to client (serialization can fail)
         let res = MsgResult::host_game(&res_game.expect("res_game is handled"))
             .map(|msg_result| {
                 if let Some(session) = self.sessions.get(&host_user_id) {
                     do_send_log(session, msg_result);
                     if new_game {
-                        do_send_log(session, MsgResult::alert("new game created".to_string()));
+                        do_send_log(session, MsgResult::alert("new game created"));
                     } else {
-                        do_send_log(session, MsgResult::alert("rejoined game".to_string()));
+                        do_send_log(session, MsgResult::alert("rejoined game"));
                     }
                 }
             })
@@ -295,26 +342,44 @@ impl Handler<JoinGame> for RelayServer {
     type Result = MessageResult<JoinGame>;
     fn handle(&mut self, msg: JoinGame, _: &mut Context<Self>) -> Self::Result {
         let JoinGame { game_id, user_id } = msg;
+        // return err if user already in a game
+        if let Some(cur_game_id) = self.user_games.get(&user_id) {
+            if cur_game_id != &game_id {
+                return MessageResult(Err("already in a another game".to_string()));
+            }
+        }
+        let mut insert_player_result = InsertPlayerResult::Joined;
+        let user_games = &mut self.user_games;
         let sessions = &self.sessions;
+        // get game
         let res = self
             .games
             .get_mut(&game_id)
             .ok_or("game not found".to_owned())
-            .and_then(|game| game.insert_player(user_id.clone()).map(|_| game))
+            // insert player into game (may error) and track user_id to game_id
+            .and_then(|game| {
+                insert_player_result = game.insert_player(user_id.clone())?;
+                user_games.insert(user_id.clone(), game_id.clone());
+                Ok(game)
+            })
+            // prepare json of game updated with new player
             .and_then(|game| match serde_json::to_string(&game) {
                 Ok(s) => Ok((game, s)),
                 Err(e) => Err(format!("{:?}", e).to_owned()),
             })
+            // send json to all clients in the game only if user 'Joined'
             .and_then(|(game, game_json)| {
-                for k in &mut game.players.keys() {
-                    if let Some(session) = sessions.get(k) {
-                        let json = game_json.clone();
+                if matches!(insert_player_result, InsertPlayerResult::Joined) {
+                    for k in &mut game.players.keys() {
                         if k != &user_id {
-                            do_send_log(session, MsgResult::joined(json));
-                        } else {
-                            do_send_log(session, MsgResult::join_game(json));
+                            if let Some(session) = sessions.get(k) {
+                                do_send_log(session, MsgResult::joined(&game_json));
+                            }
                         }
                     }
+                }
+                if let Some(session) = sessions.get(&user_id) {
+                    do_send_log(session, MsgResult::join_game(&game_json));
                 }
                 Ok(())
             });
@@ -341,7 +406,7 @@ impl Handler<StartGame> for RelayServer {
             })
             .and_then(|(msg_result, game)| {
                 let json = msg_result?;
-                send_all(json, game.players.keys(), sessions);
+                send_all(&json, game.players.keys(), sessions);
                 ctx.notify_later(
                     Replenish {
                         game_id: game.game_id.clone(),
@@ -351,6 +416,59 @@ impl Handler<StartGame> for RelayServer {
                 Ok(())
             });
         MessageResult(res)
+    }
+}
+
+impl Handler<UserStatus> for RelayServer {
+    type Result = ();
+    fn handle(&mut self, msg: UserStatus, _: &mut Context<Self>) {
+        let user_id = msg.user_id;
+        let games = &self.games;
+        let res = self
+            .user_games
+            .get(&user_id)
+            .and_then(|game_id| games.get(game_id))
+            .and_then(|game| match game.players.contains_key(&user_id) {
+                true => Some(UserStatusResult {
+                    game_id: Some(game.game_id.clone()),
+                }),
+                false => None,
+            })
+            .unwrap_or(UserStatusResult { game_id: None });
+        match MsgResult::user_status(&res) {
+            Ok(msg) => self.user_do_send_log(&user_id, &msg),
+            Err(e) => self.user_do_send_log(&user_id, &MsgResult::error(&e)),
+        }
+    }
+}
+
+impl Handler<PlayerActionRequest> for RelayServer {
+    type Result = ();
+    fn handle(&mut self, msg: PlayerActionRequest, _: &mut Context<Self>) -> Self::Result {
+        let PlayerActionRequest {
+            user_id,
+            game_id,
+            action,
+        } = msg;
+        let sessions = &self.sessions;
+        let games = &mut self.games;
+        let res = self
+            .user_games
+            .get(&user_id)
+            .ok_or("user games not found".to_string())
+            .and_then(|user_game_id| {
+                if user_game_id != &game_id {
+                    return Err("user game id invalid".to_string());
+                }
+                games.get_mut(&game_id).ok_or("game id bad".to_string())
+            })
+            .and_then(|game| game.player_action(&user_id, action).map(|e| (e, game)))
+            // TODO rewind game action upon json serialization error
+            .and_then(|(e, game)| MsgResult::player_action(&e).map(|json| (json, game)));
+        match res {
+            Err(e) => self.user_do_send_log(&user_id, &MsgResult::error(&e)),
+            Ok((json, game)) => send_all(&json, game.players.keys(), sessions),
+        };
     }
 }
 
@@ -369,7 +487,7 @@ impl Handler<Replenish> for RelayServer {
             })
             .and_then(|(json_res, game)| {
                 let json = json_res?;
-                send_all(json, game.players.keys(), sessions);
+                send_all(&json, game.players.keys(), sessions);
                 ctx.notify_later(
                     Replenish {
                         game_id: game.game_id.clone(),

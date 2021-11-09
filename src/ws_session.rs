@@ -1,8 +1,9 @@
 use crate::{
     common::{Identity, MsgResult},
+    game::PlayerAction,
     relay_server::{
-        Connect, ConnectResult, Disconnect, HostGame, JoinGame, Message, RelayServer, StartGame,
-        User, VerifySession,
+        Connect, ConnectResult, Disconnect, HostGame, JoinGame, Message, PlayerActionRequest,
+        RelayServer, StartGame, User, UserStatus, VerifySession,
     },
 };
 use actix::prelude::*;
@@ -51,6 +52,13 @@ impl WsSession {
             };
             ctx.ping(b"");
         });
+    }
+
+    /// get the ws session's user_id otherwise return login error
+    fn clone_user_id(&self) -> Result<String, String> {
+        self.user_id
+            .clone()
+            .ok_or_else(|| "user not logged in".to_string())
     }
 
     fn mailbox_check<M>(
@@ -113,12 +121,6 @@ impl WsSession {
         Ok(())
     }
 
-    fn clone_user_id(&self) -> Result<String, String> {
-        self.user_id
-            .clone()
-            .ok_or_else(|| "user not logged in".to_string())
-    }
-
     fn host_game(&self, game_id: String, ctx: &mut WSctx<Self>) -> Result<(), String> {
         let host_user_id = self.clone_user_id()?;
         self.server_addr
@@ -174,6 +176,32 @@ impl WsSession {
         Ok(())
     }
 
+    fn user_status(&self, ctx: &mut WSctx<Self>) -> Result<(), String> {
+        let user_id = self.clone_user_id()?;
+        self.server_addr
+            .send(UserStatus { user_id })
+            .into_actor(self)
+            .then(|_, _, _| fut::ready(()))
+            .wait(ctx);
+        Ok(())
+    }
+
+    fn player_action(&self, msg: String, ctx: &mut WSctx<Self>) -> Result<(), String> {
+        let user_id = self.clone_user_id()?;
+        let des = from_json::<PlayerAction>(&msg)?;
+        self.server_addr
+            .send(PlayerActionRequest {
+                action: des.action,
+                game_id: des.game_id,
+                user_id,
+            })
+            .into_actor(self)
+            .then(|_, _, _| fut::ready(()))
+            .wait(ctx);
+        Ok(())
+    }
+
+    /// parses command and payload to forward onto function, returning any error
     fn parse_message(&mut self, text: &str, ctx: &mut WSctx<Self>) -> Result<(), String> {
         let m = text.trim();
         let v: Vec<&str> = m.splitn(2, ' ').collect();
@@ -188,6 +216,8 @@ impl WsSession {
             "/host_game" => self.host_game(msg, ctx),
             "/join_game" => self.join_game(msg, ctx),
             "/start_game" => self.start_game(msg, ctx),
+            "/user_status" => self.user_status(ctx),
+            "/player_action" => self.player_action(msg, ctx),
             _ => Err(format!("unknown command type {:?}", m).to_owned()),
         }
     }

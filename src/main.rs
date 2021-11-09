@@ -104,6 +104,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(
                 Cors::default()
                     .allowed_origin("http://localhost:3000")
+                    .allowed_origin("http://192.168.0.177:3000")
                     .allowed_methods(vec!["GET", "POST"])
                     .allowed_headers(vec![
                         header::AUTHORIZATION,
@@ -123,7 +124,7 @@ async fn main() -> std::io::Result<()> {
             .service(resource("/ws/").to(ws_route))
         // .configure(services::config)
     })
-    .bind("127.0.0.1:8080")?
+    .bind("0.0.0.0:8080")?
     .run()
     .await
 }
