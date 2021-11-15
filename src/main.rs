@@ -102,17 +102,17 @@ async fn main() -> std::io::Result<()> {
         App::new()
             // redis session middleware
             .wrap(
-                Cors::default()
-                    .allowed_origin("http://localhost:3000")
-                    .allowed_origin("http://192.168.0.177:3000")
-                    .allowed_methods(vec!["GET", "POST"])
-                    .allowed_headers(vec![
-                        header::AUTHORIZATION,
-                        header::ACCEPT,
-                        header::CONTENT_TYPE,
-                    ])
-                    .supports_credentials()
-                    .max_age(3600),
+                Cors::permissive()
+                    // .allowed_origin("http://localhost:3000")
+                    // .allowed_origin("http://192.168.0.177:3000")
+                    // .allowed_methods(vec!["GET", "POST"])
+                    // .allowed_headers(vec![
+                    //     header::AUTHORIZATION,
+                    //     header::ACCEPT,
+                    //     header::CONTENT_TYPE,
+                    // ])
+                    // .supports_credentials()
+                    // .max_age(36000),
             )
             .wrap(RedisSession::new("127.0.0.1:6379", &private_key).cookie_http_only(false))
             // enable logger - always register actix-web Logger middleware last
