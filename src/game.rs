@@ -158,12 +158,19 @@ pub struct GiveAction {
 pub struct MoveAction {
     pos: Pos,
 }
+#[derive(Deserialize, Serialize, Debug)]
+pub struct RangeUpgradeAction {
+    point_cost: i8,
+}
+
 #[derive(Deserialize, Debug)]
 pub enum ActionType {
     Attack(AttackAction),
     Give(GiveAction),
     Move(MoveAction),
+    RangeUpgrade(RangeUpgradeAction),
 }
+
 #[derive(Deserialize, Debug)]
 pub struct PlayerAction {
     pub user_id: String,
@@ -181,6 +188,7 @@ pub enum ActionTypeEvent {
     Attack(AttackAction),
     Give(GiveAction),
     Move(MoveEvent),
+    RangeUpgrade(RangeUpgradeAction),
 }
 #[derive(Serialize, Debug)]
 pub struct PlayerResponse {
@@ -299,6 +307,9 @@ impl Game {
         Ok(())
     }
 
+    /// validate a player action then execute the required changes to the game
+    /// `player_flux` is a copy of the acting player to be applied at fn end
+    /// `target_flux` is a copy of the target player to be applied at match arm end
     pub fn player_action(
         &mut self,
         user_id: &str,
@@ -307,7 +318,7 @@ impl Game {
         if matches!(self.phase, GamePhase::End) {
             return Err("game over".to_string());
         }
-        let mut player_copy = self.clone_player(user_id)?;
+        let mut player_flux = self.clone_player(user_id)?;
         let action: ActionTypeEvent = match &action {
             ActionType::Move(walk) => {
                 // <VALIDATE>
@@ -316,33 +327,33 @@ impl Game {
                 self.board.in_bounds(&walk.pos, true)?;
                 if matches!(self.phase, GamePhase::InProg) {
                     // validate lives
-                    player_copy.has_lives()?;
+                    player_flux.has_lives()?;
                     // validate action points
                     // validate player range ability
                     // validate move distance against range ability
-                    player_copy.moveable_in_prog(&walk.pos)?;
+                    player_flux.moveable_in_prog(&walk.pos)?;
                     // <EXECUTE>
-                    player_copy.action_points -= 1;
+                    player_flux.action_points -= 1;
                 };
                 // <EXECUTE>
                 // remove user from current pos
-                if player_copy.pos.x != usize::MAX {
+                if player_flux.pos.x != usize::MAX {
                     self.board
                         .map
-                        .remove(&player_copy.pos.key())
+                        .remove(&player_flux.pos.key())
                         .ok_or("player desynchronized")?;
                 }
                 // set MoveActionEvent
                 let action_event = ActionTypeEvent::Move(MoveEvent {
-                    from: player_copy.pos.clone(),
+                    from: player_flux.pos.clone(),
                     to: walk.pos.clone(),
                 });
                 // set player coords
-                player_copy.pos = walk.pos.clone();
+                player_flux.pos = walk.pos.clone();
                 // place user_id in new pos
                 self.board
                     .map
-                    .insert(player_copy.pos.key().clone(), user_id.to_string());
+                    .insert(player_flux.pos.key().clone(), user_id.to_string());
                 action_event
             }
             ActionType::Attack(attack) => {
@@ -353,36 +364,36 @@ impl Game {
                     return Err("Stop hurting yourself".to_string());
                 }
                 // validate player has lives
-                player_copy.has_lives()?;
+                player_flux.has_lives()?;
 
-                let mut target_copy = self.clone_player(&attack.target_user_id)?;
+                let mut target_flux = self.clone_player(&attack.target_user_id)?;
                 // validate target is alive
-                target_copy.has_lives()?;
+                target_flux.has_lives()?;
                 // has action points
                 // player in range of target
-                player_copy.moveable_in_prog(&target_copy.pos)?;
+                player_flux.moveable_in_prog(&target_flux.pos)?;
                 // action's lives effect is -1
                 if attack.lives_effect != -1 {
                     return Err("attacking must take 1 life :'(".to_string());
                 }
                 // <EXECUTE>
                 // remove player action point
-                player_copy.action_points -= 1;
+                player_flux.action_points -= 1;
                 // remove target life
-                target_copy.lives -= 1;
+                target_flux.lives -= 1;
                 // if target life is 0 then check number of players alive
                 // if players alive is 1 then end game
-                if target_copy.lives == 0 {
-                    self.players_alive.remove(&target_copy.user_id);
+                if target_flux.lives == 0 {
+                    self.players_alive.remove(&target_flux.user_id);
                     if self.players_alive.len() == 1 {
                         self.phase = GamePhase::End;
                     }
                 }
                 // assign end phase if move ends the game
-                self.check_for_end_phase_move(&target_copy.user_id)?;
+                self.check_for_end_phase_move(&target_flux.user_id)?;
                 // apply target_copy
                 self.players
-                    .insert(target_copy.user_id.clone(), target_copy);
+                    .insert(target_flux.user_id.clone(), target_flux);
                 // return action event
                 ActionTypeEvent::Attack(AttackAction {
                     lives_effect: attack.lives_effect,
@@ -398,15 +409,15 @@ impl Game {
                     return Err("this is a futile endeavour".to_string());
                 }
                 // player has lives
-                player_copy.has_lives()?;
+                player_flux.has_lives()?;
                 // target has lives
                 let mut target_copy = self.clone_player(&give.target_user_id)?;
                 target_copy.has_lives()?;
                 // player has action points
                 // player in range of target
-                player_copy.moveable_in_prog(&target_copy.pos)?;
+                player_flux.moveable_in_prog(&target_copy.pos)?;
                 // <EXECUTE>
-                player_copy.action_points -= 1;
+                player_flux.action_points -= 1;
                 target_copy.action_points += 1;
                 // apply target_copy
                 self.players
@@ -416,10 +427,29 @@ impl Game {
                     target_user_id: give.target_user_id.clone(),
                 })
             }
+            ActionType::RangeUpgrade(range_upgrade) => {
+                // <VALIDATE>
+                // game in progress
+                self.check_in_prog()?;
+                // player has lives
+                player_flux.has_lives()?;
+                // player has enough action points and correct cost estimate
+                if player_flux.action_points < 3 || range_upgrade.point_cost != 3 {
+                    return Err("3 action points required to upgrade range".to_string());
+                }
+                // <EXECUTE>
+                // exchange action points for range
+                player_flux.action_points -= 3;
+                player_flux.range += 1;
+                // return action event
+                ActionTypeEvent::RangeUpgrade(RangeUpgradeAction {
+                    point_cost: range_upgrade.point_cost,
+                })
+            }
         };
         // apply player copy
         self.players
-            .insert(player_copy.user_id.clone(), player_copy);
+            .insert(player_flux.user_id.clone(), player_flux);
         Ok(PlayerResponse {
             game_id: self.game_id.clone(),
             user_id: user_id.to_string(),
