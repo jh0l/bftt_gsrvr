@@ -252,10 +252,16 @@ impl Game {
         Ok(())
     }
 
-    pub fn replenish(&mut self) -> Result<GamePlayers, String> {
+    /// error if game not in progress
+    pub fn check_in_prog(&self) -> Result<(), String> {
         if !matches!(self.phase, GamePhase::InProg) {
             return Err("Game not in progress".to_owned());
         }
+        Ok(())
+    }
+
+    pub fn replenish(&mut self) -> Result<GamePlayers, String> {
+        self.check_in_prog()?;
         for player in self.players.values_mut() {
             if player.lives > 0 {
                 player.action_points += 1;
@@ -268,7 +274,16 @@ impl Game {
         })
     }
 
-    pub fn check_end_phase_move(&mut self, player_id: &str) -> Result<(), String> {
+    pub fn clone_player(&self, player_id: &str) -> Result<Player, String> {
+        let player = self
+            .players
+            .get(player_id)
+            .ok_or(format!("player {} not found", player_id))?
+            .clone();
+        Ok(player)
+    }
+
+    pub fn check_for_end_phase_move(&mut self, player_id: &str) -> Result<(), String> {
         if self
             .players
             .get(player_id)
@@ -292,11 +307,7 @@ impl Game {
         if matches!(self.phase, GamePhase::End) {
             return Err("game over".to_string());
         }
-        let mut player_copy = self
-            .players
-            .get(user_id)
-            .and_then(|p| Some(p.clone()))
-            .ok_or(format!("player {} not found", user_id))?;
+        let mut player_copy = self.clone_player(user_id)?;
         let action: ActionTypeEvent = match &action {
             ActionType::Move(walk) => {
                 // <VALIDATE>
@@ -314,11 +325,6 @@ impl Game {
                     player_copy.action_points -= 1;
                 };
                 // <EXECUTE>
-                // set MoveActionEvent
-                let action_event = ActionTypeEvent::Move(MoveEvent {
-                    from: player_copy.pos.clone(),
-                    to: walk.pos.clone(),
-                });
                 // remove user from current pos
                 if player_copy.pos.x != usize::MAX {
                     self.board
@@ -326,6 +332,11 @@ impl Game {
                         .remove(&player_copy.pos.key())
                         .ok_or("player desynchronized")?;
                 }
+                // set MoveActionEvent
+                let action_event = ActionTypeEvent::Move(MoveEvent {
+                    from: player_copy.pos.clone(),
+                    to: walk.pos.clone(),
+                });
                 // set player coords
                 player_copy.pos = walk.pos.clone();
                 // place user_id in new pos
@@ -336,10 +347,7 @@ impl Game {
             }
             ActionType::Attack(attack) => {
                 // <VALIDATE>
-                // validate game in progress
-                if !matches!(self.phase, GamePhase::InProg) {
-                    return Err("Game not in progress".to_string());
-                }
+                self.check_in_prog()?;
                 // validate player is not targeting themselves
                 if user_id == attack.target_user_id {
                     return Err("Stop hurting yourself".to_string());
@@ -347,17 +355,13 @@ impl Game {
                 // validate player has lives
                 player_copy.has_lives()?;
 
-                let mut target_copy = self
-                    .players
-                    .get_mut(&attack.target_user_id)
-                    .ok_or(format!("target {} not found", attack.target_user_id))?
-                    .clone();
+                let mut target_copy = self.clone_player(&attack.target_user_id)?;
                 // validate target is alive
                 target_copy.has_lives()?;
-                // validate action points
-                // validate player range ability to target
+                // has action points
+                // player in range of target
                 player_copy.moveable_in_prog(&target_copy.pos)?;
-                // validate lives effect is -1
+                // action's lives effect is -1
                 if attack.lives_effect != -1 {
                     return Err("attacking must take 1 life :'(".to_string());
                 }
@@ -374,29 +378,40 @@ impl Game {
                         self.phase = GamePhase::End;
                     }
                 }
-                // check and assign end phase if move ends the game
-                self.check_end_phase_move(&target_copy.user_id)?;
+                // assign end phase if move ends the game
+                self.check_for_end_phase_move(&target_copy.user_id)?;
                 // apply target_copy
                 self.players
                     .insert(target_copy.user_id.clone(), target_copy);
+                // return action event
                 ActionTypeEvent::Attack(AttackAction {
                     lives_effect: attack.lives_effect,
                     target_user_id: attack.target_user_id.clone(),
                 })
             }
             ActionType::Give(give) => {
-                // TODO <VALIDATE>
+                // <VALIDATE>
+                // game in progress
+                self.check_in_prog()?;
+                // player is not targeting themselves
+                if user_id == give.target_user_id {
+                    return Err("this is a futile endeavour".to_string());
+                }
+                // player has lives
+                player_copy.has_lives()?;
+                // target has lives
+                let mut target_copy = self.clone_player(&give.target_user_id)?;
+                target_copy.has_lives()?;
+                // player has action points
+                // player in range of target
+                player_copy.moveable_in_prog(&target_copy.pos)?;
                 // <EXECUTE>
                 player_copy.action_points -= 1;
-                let mut target_copy = self
-                    .players
-                    .get_mut(&give.target_user_id)
-                    .ok_or(format!("target {} not found", give.target_user_id))?
-                    .clone();
                 target_copy.action_points += 1;
                 // apply target_copy
                 self.players
                     .insert(target_copy.user_id.clone(), target_copy);
+                // return action event
                 ActionTypeEvent::Give(GiveAction {
                     target_user_id: give.target_user_id.clone(),
                 })
