@@ -2,7 +2,7 @@ use rand::Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::{Game, GamePlayers, PlayerResponse};
+use crate::game::{Game, Player, PlayerResponse};
 
 #[derive(Deserialize)]
 pub struct Identity {
@@ -24,6 +24,23 @@ pub enum Fail {
 #[derive(Clone, Debug, Serialize)]
 pub struct UserStatusResult {
     pub game_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionPointUpdate {
+    pub user_id: String,
+    pub game_id: String,
+    pub action_points: u32,
+}
+
+impl ActionPointUpdate {
+    pub fn new(user_id: &str, game_id: &str, action_points: u32) -> ActionPointUpdate {
+        ActionPointUpdate {
+            user_id: user_id.to_string(),
+            game_id: game_id.to_string(),
+            action_points,
+        }
+    }
 }
 
 pub struct MsgResult;
@@ -50,32 +67,32 @@ impl MsgResult {
         MsgResult::json_string("/host_game_success", game)
     }
 
-    pub fn join_game(json: &str) -> String {
-        format!("/join_game_success {}", json).to_string()
+    pub fn join_game(game: &Game) -> Result<String, String> {
+        MsgResult::json_string("/join_game_success", game)
     }
 
-    pub fn joined(json: &str) -> String {
-        format!("/player_joined {}", json).to_string()
+    pub fn joined(json: &Player) -> Result<String, String> {
+        MsgResult::json_string("/player_joined {}", json)
     }
 
     pub fn start_game(game: &Game) -> Result<String, String> {
         MsgResult::json_string("/start_game", game)
     }
 
-    pub fn user_status(user_status: &UserStatusResult) -> Result<String, String> {
-        MsgResult::json_string("/user_status", user_status)
+    pub fn action_point_update(apu: &ActionPointUpdate) -> Result<String, String> {
+        MsgResult::json_string("/action_point_update", apu)
     }
 
-    pub fn replenish(game_players: &GamePlayers) -> Result<String, String> {
-        MsgResult::json_string("/replenish", game_players)
+    pub fn user_status(user_status: &UserStatusResult) -> Result<String, String> {
+        MsgResult::json_string("/user_status", user_status)
     }
 
     pub fn player_action(action: &PlayerResponse) -> Result<String, String> {
         MsgResult::json_string("/player_action", action)
     }
 
-    pub fn error(msg: &str) -> String {
-        format!("/error {}", msg).to_string()
+    pub fn error(context: &str, msg: &str) -> String {
+        format!("/error {}: {}", context, msg).to_string()
     }
 
     pub fn alert(msg: &str) -> String {

@@ -33,16 +33,19 @@ impl Display for Pos {
 #[derive(Debug, Clone, Serialize)]
 pub struct Player {
     pub user_id: String,
+    pub game_id: String,
     pub lives: u32,
+    #[serde(skip_serializing)]
     pub action_points: u32,
     pub pos: Pos,
     pub range: usize,
 }
 
 impl Player {
-    pub fn new(user_id: String) -> Player {
+    pub fn new(user_id: String, game_id: String) -> Player {
         Player {
             user_id,
+            game_id,
             lives: 0,
             action_points: 0,
             pos: Pos {
@@ -134,12 +137,6 @@ pub struct Game {
     pub turn_end_unix: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct GamePlayers {
-    pub game_id: String,
-    pub players: HashMap<String, Player>,
-}
-
 pub enum InsertPlayerResult {
     Joined,
     Rejoined,
@@ -224,8 +221,10 @@ impl Game {
             return Ok(InsertPlayerResult::Rejoined);
         }
         if matches!(self.phase, GamePhase::Init) {
-            self.players
-                .insert(user_id.clone(), Player::new(user_id.clone()));
+            self.players.insert(
+                user_id.clone(),
+                Player::new(user_id.clone(), self.game_id.clone()),
+            );
             self.players_alive.insert(user_id.clone());
             return Ok(InsertPlayerResult::Joined);
         }
@@ -268,18 +267,21 @@ impl Game {
         Ok(())
     }
 
-    pub fn replenish(&mut self) -> Result<GamePlayers, String> {
+    pub fn replenish(&mut self) -> Result<Vec<(String, String, u32)>, String> {
         self.check_in_prog()?;
+        let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
         for player in self.players.values_mut() {
             if player.lives > 0 {
                 player.action_points += 1;
             }
+            action_point_updates.push((
+                player.user_id.clone(),
+                self.game_id.clone(),
+                player.action_points,
+            ));
         }
         self.turn_end_unix = from_now(self.turn_time_secs);
-        Ok(GamePlayers {
-            game_id: self.game_id.clone(),
-            players: self.players.to_owned(),
-        })
+        Ok(action_point_updates)
     }
 
     pub fn clone_player(&self, player_id: &str) -> Result<Player, String> {
@@ -310,14 +312,16 @@ impl Game {
     /// validate a player action then execute the required changes to the game
     /// `player_flux` is a copy of the acting player to be applied at fn end
     /// `target_flux` is a copy of the target player to be applied at match arm end
+    /// returns Vec<String> to list players that need action_point updates
     pub fn player_action(
         &mut self,
         user_id: &str,
         action: ActionType,
-    ) -> Result<PlayerResponse, String> {
+    ) -> Result<(PlayerResponse, Vec<(String, String, u32)>), String> {
         if matches!(self.phase, GamePhase::End) {
             return Err("game over".to_string());
         }
+        let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
         let mut player_flux = self.clone_player(user_id)?;
         let action: ActionTypeEvent = match &action {
             ActionType::Move(walk) => {
@@ -376,7 +380,6 @@ impl Game {
                 if attack.lives_effect != -1 {
                     return Err("attacking must take 1 life :'(".to_string());
                 }
-                // <EXECUTE>
                 // remove player action point
                 player_flux.action_points -= 1;
                 // remove target life
@@ -411,17 +414,23 @@ impl Game {
                 // player has lives
                 player_flux.has_lives()?;
                 // target has lives
-                let mut target_copy = self.clone_player(&give.target_user_id)?;
-                target_copy.has_lives()?;
+                let mut target_flux = self.clone_player(&give.target_user_id)?;
+                target_flux.has_lives()?;
                 // player has action points
                 // player in range of target
-                player_flux.moveable_in_prog(&target_copy.pos)?;
+                player_flux.moveable_in_prog(&target_flux.pos)?;
                 // <EXECUTE>
                 player_flux.action_points -= 1;
-                target_copy.action_points += 1;
+                target_flux.action_points += 1;
+                // add target to action point update list
+                action_point_updates.push((
+                    target_flux.user_id.clone(),
+                    self.game_id.clone(),
+                    target_flux.action_points,
+                ));
                 // apply target_copy
                 self.players
-                    .insert(target_copy.user_id.clone(), target_copy);
+                    .insert(target_flux.user_id.clone(), target_flux);
                 // return action event
                 ActionTypeEvent::Give(GiveAction {
                     target_user_id: give.target_user_id.clone(),
@@ -447,15 +456,24 @@ impl Game {
                 })
             }
         };
+        // add player to action point update list
+        action_point_updates.push((
+            user_id.to_string(),
+            self.game_id.clone(),
+            player_flux.action_points,
+        ));
         // apply player copy
         self.players
             .insert(player_flux.user_id.clone(), player_flux);
-        Ok(PlayerResponse {
-            game_id: self.game_id.clone(),
-            user_id: user_id.to_string(),
-            phase: self.phase.clone(),
-            action,
-        })
+        Ok((
+            PlayerResponse {
+                game_id: self.game_id.clone(),
+                user_id: user_id.to_string(),
+                phase: self.phase.clone(),
+                action,
+            },
+            action_point_updates,
+        ))
     }
 }
 

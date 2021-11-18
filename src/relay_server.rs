@@ -1,4 +1,5 @@
 use crate::common::gen_rng_string;
+use crate::common::ActionPointUpdate;
 use crate::common::Fail;
 use crate::common::MsgResult;
 use crate::common::SuccessResult;
@@ -332,23 +333,6 @@ impl Handler<HostGame> for RelayServer {
     }
 }
 
-use serde::Serialize;
-#[derive(Debug, Clone, Serialize)]
-enum MoveType {
-    Attack,
-    Move,
-    Give,
-    Hover,
-}
-#[derive(Debug, Clone, Serialize)]
-struct PlayerMove {
-    user_id: String,
-    x: u64,
-    y: u64,
-    action: MoveType,
-    hash: String,
-}
-
 impl Handler<JoinGame> for RelayServer {
     type Result = MessageResult<JoinGame>;
     fn handle(&mut self, msg: JoinGame, _: &mut Context<Self>) -> Self::Result {
@@ -374,24 +358,29 @@ impl Handler<JoinGame> for RelayServer {
                 Ok(game)
             })
             // prepare json of game updated with new player
-            .and_then(|game| match serde_json::to_string(&game) {
-                Ok(s) => Ok((game, s)),
-                Err(e) => Err(format!("{:?}", e).to_owned()),
-            })
-            // send json to all clients in the game only if user 'Joined'
-            .and_then(|(game, game_json)| {
-                // only send game json to current players if player not already in game
+            .and_then(|game| {
+                // only send game json to current players if player 'Joined'
+                let msg = MsgResult::joined(&game.players[&user_id])
+                    .unwrap_or_else(|e| MsgResult::error("player_joined", &e));
                 if matches!(insert_player_result, InsertPlayerResult::Joined) {
-                    let msg = MsgResult::joined(&game_json);
                     for k in &mut game.players.keys() {
                         if k != &user_id {
                             sessions.send_user(k, &msg);
                         }
                     }
                 }
+                let msg = MsgResult::join_game(&game)
+                    .unwrap_or_else(|e| MsgResult::error("join_game", &e));
                 // send game json to player that joined (or rejoined)
-                sessions.send_user(&user_id, &MsgResult::join_game(&game_json));
-
+                sessions.send_user(&user_id, &msg);
+                let apu = ActionPointUpdate::new(
+                    &user_id,
+                    &game_id,
+                    game.players[&user_id].action_points,
+                );
+                let apu_msg = MsgResult::action_point_update(&apu)
+                    .unwrap_or_else(|e| MsgResult::error("joined action_point_update", &e));
+                sessions.send_user(&user_id, &apu_msg);
                 Ok(())
             });
         MessageResult(res)
@@ -417,8 +406,16 @@ impl Handler<StartGame> for RelayServer {
             })
             .and_then(|(msg_result, game)| {
                 let json = msg_result?;
+                // send game
                 sessions.send_all(game.players.keys(), &json);
-                send_all(&json, game.players.keys(), sessions);
+                // send action points to each player
+                for (player_id, player) in &game.players {
+                    let apu = ActionPointUpdate::new(player_id, &game_id, player.action_points);
+                    let msg: String = MsgResult::action_point_update(&apu)
+                        .unwrap_or_else(|e| MsgResult::error("action_point_update", &e));
+                    sessions.send_user(&player_id, &msg);
+                }
+                // schedule replenish
                 ctx.notify_later(
                     Replenish {
                         game_id: game.game_id.clone(),
@@ -449,7 +446,7 @@ impl Handler<UserStatus> for RelayServer {
             .unwrap_or(UserStatusResult { game_id: None });
         let msg = match MsgResult::user_status(&res) {
             Ok(msg) => msg,
-            Err(e) => MsgResult::error(&e),
+            Err(e) => MsgResult::error("user_status", &e),
         };
         self.sessions.send_user(&user_id, &msg);
     }
@@ -481,23 +478,16 @@ impl Handler<PlayerActionRequest> for RelayServer {
                 MsgResult::player_action(&res).map(|json| (json, game, apu))
             });
         match res {
-            Err(e) => sessions.send_user(&user_id, &MsgResult::error(&e)),
-            Ok((json, game, apu)) => {
-                for ele in apu {
-                    let _ = MsgResult::action_point_update(&ActionPointUpdate::new(
-                        &ele,
-                        &game.game_id,
-                        game.players[&ele].action_points,
-                    ))
-                    .and_then(|op| {
-                        sessions.send_user(&ele, &op);
-                        Ok(())
-                    })
-                    .or_else(|e| {
-                        println!("{}", e);
-                        Err(())
-                    });
+            Err(e) => sessions.send_user(&user_id, &MsgResult::error("player_action", &e)),
+            Ok((json, game, apu_user_ids)) => {
+                // send action point updates
+                for (uid, gid, ap) in apu_user_ids {
+                    let apu = ActionPointUpdate::new(&uid, &gid, ap);
+                    let msg = MsgResult::action_point_update(&apu)
+                        .unwrap_or_else(|e| MsgResult::alert(&e));
+                    sessions.send_user(&uid, &msg);
                 }
+                // send game updates
                 self.sessions.send_all(game.players.keys(), &json)
             }
         };
@@ -514,20 +504,25 @@ impl Handler<Replenish> for RelayServer {
             .get_mut(&game_id)
             .ok_or("Game not found".to_owned())
             .and_then(|game| {
-                game.replenish()
-                    .map(|game_players| (MsgResult::replenish(&game_players), game))
+                let apu = game.replenish()?;
+                Ok((game, apu))
             })
-            .and_then(|(json_res, game)| {
-                let json = json_res?;
-                sessions.send_all(game.players.keys(), &json);
+            .and_then(|(game, apu)| {
+                for (uid, gid, ap) in apu {
+                    let apu = ActionPointUpdate::new(&uid, &gid, ap);
+                    let msg = MsgResult::action_point_update(&apu)
+                        .unwrap_or_else(|e| MsgResult::alert(&e));
+                    sessions.send_user(&uid, &msg);
+                }
                 ctx.notify_later(
-                    Replenish {
-                        game_id: game.game_id.clone(),
-                    },
+                    Replenish { game_id },
                     Duration::from_secs(game.turn_time_secs as u64),
                 );
                 Ok(())
             });
+        if res.is_err() {
+            dbg!(&res);
+        }
         MessageResult(res)
     }
 }

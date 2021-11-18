@@ -69,7 +69,7 @@ impl WsSession {
         match msg {
             Ok(m) => Ok(m),
             Err(e) => {
-                ctx.text(MsgResult::error("mailbox error"));
+                ctx.text(MsgResult::error("server", "mailbox error"));
                 dbg!(e);
                 Err(())
             }
@@ -94,11 +94,14 @@ impl WsSession {
                 if let Ok(res) = res {
                     match res {
                         ConnectResult::Fail(_) => {
-                            ctx.text(MsgResult::error("FailPassword"));
+                            ctx.text(MsgResult::error("user", "FailPassword"));
                         }
                         ConnectResult::Success(s) => {
                             act.user_id = Some(user_id);
-                            ctx.text(MsgResult::login(&s).unwrap_or_else(|e| MsgResult::error(&e)));
+                            ctx.text(
+                                MsgResult::login(&s)
+                                    .unwrap_or_else(|e| MsgResult::error("login", &e)),
+                            );
                         }
                     }
                 }
@@ -132,7 +135,7 @@ impl WsSession {
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     if let Err(msg) = res {
-                        ctx.text(MsgResult::error(msg.as_str()));
+                        ctx.text(MsgResult::error("server", msg.as_str()));
                     }
                 }
                 fut::ready(())
@@ -149,7 +152,7 @@ impl WsSession {
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     if let Err(msg) = res {
-                        ctx.text(MsgResult::error(msg.as_str()));
+                        ctx.text(MsgResult::error("server", msg.as_str()));
                     }
                 }
                 fut::ready(())
@@ -167,7 +170,7 @@ impl WsSession {
             .then(|res, act, ctx| {
                 if let Ok(res) = act.mailbox_check(res, ctx) {
                     if let Err(msg) = res {
-                        ctx.text(MsgResult::error(msg.as_str()));
+                        ctx.text(MsgResult::error("server", msg.as_str()));
                     }
                 }
                 fut::ready(())
@@ -272,7 +275,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
             ws::Message::Pong(_) => self.hb = Instant::now(),
             ws::Message::Text(text) => {
                 self.parse_message(&text, ctx).unwrap_or_else(|err| {
-                    ctx.text(MsgResult::error(err.as_str()));
+                    ctx.text(MsgResult::error("server", err.as_str()));
                 });
             }
             ws::Message::Binary(_) => println!("[srv/s] Unexpected binary"),

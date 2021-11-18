@@ -1,6 +1,5 @@
 use actix::prelude::*;
 use actix_cors::Cors;
-use actix_http::http::header;
 use actix_redis::RedisSession;
 use actix_session::Session;
 use actix_web::{
