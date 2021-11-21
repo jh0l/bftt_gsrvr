@@ -159,6 +159,10 @@ pub struct MoveAction {
 pub struct RangeUpgradeAction {
     point_cost: i8,
 }
+#[derive(Deserialize, Serialize, Debug)]
+pub struct HealAction {
+    point_cost: i8,
+}
 
 #[derive(Deserialize, Debug)]
 pub enum ActionType {
@@ -166,6 +170,7 @@ pub enum ActionType {
     Give(GiveAction),
     Move(MoveAction),
     RangeUpgrade(RangeUpgradeAction),
+    Heal(HealAction),
 }
 
 #[derive(Deserialize, Debug)]
@@ -186,6 +191,7 @@ pub enum ActionTypeEvent {
     Give(GiveAction),
     Move(MoveEvent),
     RangeUpgrade(RangeUpgradeAction),
+    Heal(HealAction),
 }
 #[derive(Serialize, Debug)]
 pub struct PlayerResponse {
@@ -228,7 +234,7 @@ impl Game {
             self.players_alive.insert(user_id.clone());
             return Ok(InsertPlayerResult::Joined);
         }
-        return Err("game in progress".to_owned());
+        return Err("game unavailable".to_owned());
     }
 
     pub fn start_game(&mut self, rnd: &mut ThreadRng) -> Result<(), String> {
@@ -257,6 +263,11 @@ impl Game {
         self.phase = GamePhase::InProg;
         self.turn_end_unix = from_now(self.turn_time_secs);
         Ok(())
+    }
+
+    /// return true if game phase is ::End
+    pub fn is_end_phase(&mut self) -> bool {
+        matches!(self.phase, GamePhase::End)
     }
 
     /// error if game not in progress
@@ -453,6 +464,24 @@ impl Game {
                 // return action event
                 ActionTypeEvent::RangeUpgrade(RangeUpgradeAction {
                     point_cost: range_upgrade.point_cost,
+                })
+            }
+            ActionType::Heal(heal) => {
+                // <VALIDATE>
+                // game in progress
+                self.check_in_prog()?;
+                // player has lives
+                player_flux.has_lives()?;
+                if player_flux.action_points < 3 || heal.point_cost != 3 {
+                    return Err("3 action points required to upgrade range".to_string());
+                }
+                // <EXECUTE>
+                // exchange action points for life
+                player_flux.action_points -= 3;
+                player_flux.lives += 1;
+                // return action event
+                ActionTypeEvent::Heal(HealAction {
+                    point_cost: heal.point_cost,
                 })
             }
         };

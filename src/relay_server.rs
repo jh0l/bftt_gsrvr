@@ -354,7 +354,10 @@ impl Handler<JoinGame> for RelayServer {
             // insert player into game (may error) and track user_id to game_id
             .and_then(|game| {
                 insert_player_result = game.insert_player(user_id.clone())?;
-                user_games.insert(user_id.clone(), game_id.clone());
+                // dont lock user into game if game is over
+                if !game.is_end_phase() {
+                    user_games.insert(user_id.clone(), game_id.clone());
+                }
                 Ok(game)
             })
             // prepare json of game updated with new player
@@ -454,7 +457,7 @@ impl Handler<UserStatus> for RelayServer {
 
 impl Handler<PlayerActionRequest> for RelayServer {
     type Result = ();
-    fn handle(&mut self, msg: PlayerActionRequest, _: &mut Context<Self>) -> Self::Result {
+    fn handle(&mut self, msg: PlayerActionRequest, ctx: &mut Context<Self>) -> Self::Result {
         let PlayerActionRequest {
             user_id,
             game_id,
@@ -462,8 +465,8 @@ impl Handler<PlayerActionRequest> for RelayServer {
         } = msg;
         let sessions = &self.sessions;
         let games = &mut self.games;
-        let res = self
-            .user_games
+        let user_games = &mut self.user_games;
+        let res = user_games
             .get(&user_id)
             .ok_or("user games not found".to_string())
             .and_then(|user_game_id| {
@@ -472,7 +475,22 @@ impl Handler<PlayerActionRequest> for RelayServer {
                 }
                 games.get_mut(&game_id).ok_or("game id bad".to_string())
             })
-            .and_then(|game| game.player_action(&user_id, action).map(|e| (e, game)))
+            .and_then(|game| {
+                game.player_action(&user_id, action).map(|e| {
+                    // if game is over then remove user_games entry for all players in the game
+                    // stops users from being locked into the game
+                    if game.is_end_phase() {
+                        for user_id in game.players.keys() {
+                            user_games.remove(user_id);
+                            // tell RelayServer to send user new /user_status update through user session
+                            ctx.notify(UserStatus {
+                                user_id: user_id.to_string(),
+                            });
+                        }
+                    }
+                    (e, game)
+                })
+            })
             // TODO rewind game action upon json serialization error
             .and_then(|((res, apu), game)| {
                 MsgResult::player_action(&res).map(|json| (json, game, apu))

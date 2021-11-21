@@ -72,7 +72,7 @@ impl MsgResult {
     }
 
     pub fn joined(json: &Player) -> Result<String, String> {
-        MsgResult::json_string("/player_joined {}", json)
+        MsgResult::json_string("/player_joined", json)
     }
 
     pub fn start_game(game: &Game) -> Result<String, String> {
