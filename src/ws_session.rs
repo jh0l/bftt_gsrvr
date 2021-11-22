@@ -2,8 +2,8 @@ use crate::{
     common::{Identity, MsgResult},
     game::PlayerAction,
     relay_server::{
-        Connect, ConnectResult, Disconnect, HostGame, JoinGame, Message, PlayerActionRequest,
-        RelayServer, StartGame, User, UserStatus, VerifySession,
+        ConfigGame, Connect, ConnectResult, Disconnect, HostGame, JoinGame, Message,
+        PlayerActionRequest, RelayServer, StartGame, User, UserStatus, VerifySession,
     },
 };
 use actix::prelude::*;
@@ -161,6 +161,21 @@ impl WsSession {
         Ok(())
     }
 
+    fn conf_game(&self, msg: String, ctx: &mut WSctx<Self>) -> Result<(), String> {
+        let user_id = self.clone_user_id()?;
+        let des = from_json::<ConfigGame>(&msg)?;
+        self.server_addr
+            .send(ConfigGame {
+                op: des.op,
+                game_id: des.game_id,
+                user_id,
+            })
+            .into_actor(self)
+            .then(|_, _, _| fut::ready(()))
+            .wait(ctx);
+        Ok(())
+    }
+
     fn start_game(&self, game_id: String, ctx: &mut WSctx<Self>) -> Result<(), String> {
         let user_id = self.clone_user_id()?;
 
@@ -218,6 +233,7 @@ impl WsSession {
             "/verify" => self.verify_session(msg, ctx),
             "/host_game" => self.host_game(msg, ctx),
             "/join_game" => self.join_game(msg, ctx),
+            "/conf_game" => self.conf_game(msg, ctx),
             "/start_game" => self.start_game(msg, ctx),
             "/user_status" => self.user_status(ctx),
             "/player_action" => self.player_action(msg, ctx),
@@ -275,7 +291,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
             ws::Message::Pong(_) => self.hb = Instant::now(),
             ws::Message::Text(text) => {
                 self.parse_message(&text, ctx).unwrap_or_else(|err| {
-                    ctx.text(MsgResult::error("server", err.as_str()));
+                    ctx.text(MsgResult::error("session", err.as_str()));
                 });
             }
             ws::Message::Binary(_) => println!("[srv/s] Unexpected binary"),

@@ -1,5 +1,6 @@
 use crate::common::gen_rng_string;
 use crate::common::ActionPointUpdate;
+use crate::common::ConfigGameOp;
 use crate::common::Fail;
 use crate::common::MsgResult;
 use crate::common::SuccessResult;
@@ -11,6 +12,7 @@ use crate::game::Player;
 use crate::game::BOARD_SIZE;
 use actix::prelude::*;
 use rand::prelude::ThreadRng;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -75,6 +77,13 @@ pub struct JoinGame {
 }
 
 /// Edit game, if already started, non-existant - throw error
+#[derive(Message, Debug, Clone, Deserialize)]
+#[rtype(result = "()")]
+pub struct ConfigGame {
+    pub game_id: String,
+    pub user_id: String,
+    pub op: ConfigGameOp,
+}
 
 /// Start game, if non-existant throw error
 #[derive(Message, Clone, Debug)]
@@ -387,6 +396,37 @@ impl Handler<JoinGame> for RelayServer {
                 Ok(())
             });
         MessageResult(res)
+    }
+}
+
+impl Handler<ConfigGame> for RelayServer {
+    type Result = ();
+    fn handle(&mut self, msg: ConfigGame, _: &mut Context<Self>) -> Self::Result {
+        let ConfigGame {
+            game_id,
+            user_id,
+            op,
+        } = msg;
+        let sessions = &self.sessions;
+        self.games
+            .get_mut(&game_id)
+            .ok_or("Game not found".to_owned())
+            .and_then(|game| {
+                if game.host_user_id != Some(user_id.clone()) {
+                    return Err("only host can configure game".to_owned());
+                }
+                game.configure(&op)
+                    .map(|_| (MsgResult::conf_game(&game), game))
+            })
+            .and_then(|(msg_result, game)| {
+                let json = msg_result?;
+                // send game
+                sessions.send_all(game.players.keys(), &json);
+                Ok(())
+            })
+            .unwrap_or_else(|e| {
+                sessions.send_user(&user_id, &MsgResult::error("conf_game", &e));
+            });
     }
 }
 

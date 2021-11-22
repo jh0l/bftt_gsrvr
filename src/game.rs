@@ -5,6 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::common::ConfigGameOp;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
     pub x: usize,
@@ -235,6 +237,25 @@ impl Game {
             return Ok(InsertPlayerResult::Joined);
         }
         return Err("game unavailable".to_owned());
+    }
+
+    pub fn configure(&mut self, conf: &ConfigGameOp) -> Result<(), String> {
+        match *conf {
+            ConfigGameOp::TurnTimeSecs(v) => {
+                if v > 60 * 60 * 24 {
+                    return Err("maximum of 24 hours is required".to_string());
+                }
+                if v < 10 {
+                    return Err("minimum of 10 seconds is required".to_string());
+                }
+                self.turn_time_secs = v;
+            }
+            ConfigGameOp::InitActPts(v) => {}
+            ConfigGameOp::InitLives(v) => {}
+            ConfigGameOp::InitRange(v) => {}
+            ConfigGameOp::BoardSize(v) => {}
+        };
+        Ok(())
     }
 
     pub fn start_game(&mut self, rnd: &mut ThreadRng) -> Result<(), String> {
