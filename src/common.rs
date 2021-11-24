@@ -45,10 +45,11 @@ impl ActionPointUpdate {
 #[derive(Debug, Clone, Deserialize)]
 pub enum ConfigGameOp {
     TurnTimeSecs(u64),
+    MaxPlayers(u16),
+    BoardSize(usize),
     InitLives(u32),
     InitRange(usize),
     InitActPts(u32),
-    BoardSize(usize),
 }
 
 pub struct MsgResult;

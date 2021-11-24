@@ -48,13 +48,13 @@ impl Player {
         Player {
             user_id,
             game_id,
-            lives: 0,
-            action_points: 0,
+            lives: INIT_LIVES,
+            action_points: INIT_ACTION_POINTS,
             pos: Pos {
                 x: usize::MAX,
                 y: usize::MAX,
             },
-            range: 2,
+            range: INIT_RANGE,
         }
     }
 
@@ -109,15 +109,6 @@ impl Board {
         }
         Ok(())
     }
-
-    // pub fn set(&mut self, x: usize, y: usize, v: Option<String>) -> Result<(), String> {
-    //     let len = self.0.len();
-    //     if x >= len || y >= len || x < 0 || y < 0 {
-    //         return Err("out of range".to_owned());
-    //     }
-    //     self.0[x][y] = v;
-    //     return Ok(());
-    // }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +116,22 @@ pub enum GamePhase {
     Init,
     InProg,
     End,
+}
+#[derive(Debug, Clone, Serialize)]
+pub enum InitPosConfig {
+    Random,
+    Manual,
+    RandomBlind,
+    ManualSecret,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct GameConfig {
+    pub turn_time_secs: u64,
+    pub max_players: u16,
+    pub init_action_points: u32,
+    pub init_lives: u32,
+    pub init_range: usize,
+    pub init_pos: InitPosConfig,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,9 +141,9 @@ pub struct Game {
     pub host_user_id: Option<String>,
     pub players: HashMap<String, Player>,
     pub players_alive: HashSet<String>,
-    pub turn_time_secs: u64,
     pub board: Board,
     pub turn_end_unix: u64,
+    pub config: GameConfig,
 }
 
 pub enum InsertPlayerResult {
@@ -203,7 +210,25 @@ pub struct PlayerResponse {
     phase: GamePhase,
 }
 
-pub const BOARD_SIZE: u16 = 18;
+pub const TURN_TIME_SECS: u64 = 60;
+pub const MAX_PLAYERS: u16 = 13;
+pub const BOARD_SIZE: u16 = 20;
+pub const INIT_RANGE: usize = 2;
+pub const INIT_ACTION_POINTS: u32 = 1;
+pub const INIT_LIVES: u32 = 3;
+
+impl GameConfig {
+    pub fn new() -> GameConfig {
+        GameConfig {
+            init_range: INIT_RANGE,
+            max_players: MAX_PLAYERS,
+            init_action_points: INIT_ACTION_POINTS,
+            init_lives: INIT_LIVES,
+            init_pos: InitPosConfig::Manual,
+            turn_time_secs: TURN_TIME_SECS,
+        }
+    }
+}
 
 impl Game {
     pub fn new(game_id: String, size: u16) -> Game {
@@ -213,9 +238,9 @@ impl Game {
             host_user_id: None,
             players: HashMap::new(),
             players_alive: HashSet::new(),
-            turn_time_secs: 10,
             board: Board::new(size as usize),
             turn_end_unix: 0,
+            config: GameConfig::new(),
         }
     }
 
@@ -229,10 +254,11 @@ impl Game {
             return Ok(InsertPlayerResult::Rejoined);
         }
         if matches!(self.phase, GamePhase::Init) {
-            self.players.insert(
-                user_id.clone(),
-                Player::new(user_id.clone(), self.game_id.clone()),
-            );
+            let mut player = Player::new(user_id.clone(), self.game_id.clone());
+            player.lives = self.config.init_lives;
+            player.action_points = self.config.init_action_points;
+            player.range = self.config.init_range;
+            self.players.insert(user_id.clone(), player);
             self.players_alive.insert(user_id.clone());
             return Ok(InsertPlayerResult::Joined);
         }
@@ -240,20 +266,58 @@ impl Game {
     }
 
     pub fn configure(&mut self, conf: &ConfigGameOp) -> Result<(), String> {
+        if !matches!(self.phase, GamePhase::Init) {
+            return Err("configuration must be during initialisation".to_string());
+        }
         match *conf {
             ConfigGameOp::TurnTimeSecs(v) => {
-                if v > 60 * 60 * 24 {
-                    return Err("maximum of 24 hours is required".to_string());
-                }
                 if v < 10 {
                     return Err("minimum of 10 seconds is required".to_string());
                 }
-                self.turn_time_secs = v;
+                if v > 60 * 60 * 24 {
+                    return Err("maximum of 24 hours is required".to_string());
+                }
+                self.config.turn_time_secs = v;
             }
-            ConfigGameOp::InitActPts(v) => {}
-            ConfigGameOp::InitLives(v) => {}
-            ConfigGameOp::InitRange(v) => {}
-            ConfigGameOp::BoardSize(v) => {}
+            ConfigGameOp::MaxPlayers(v) => {
+                if self.board.size * self.board.size < v.into() {
+                    return Err(format!(
+                        "{} players won't fit in a {} by {} board",
+                        v, self.board.size, self.board.size,
+                    ));
+                }
+                if self.players.len() > v.into() {
+                    return Err("Cannot set max players below current player count".to_string());
+                }
+                self.config.max_players = v;
+            }
+            ConfigGameOp::BoardSize(v) => {
+                if usize::from(self.config.max_players) > v * v {
+                    return Err(format!(
+                        "{} players won't fit in a {} by {} board",
+                        self.config.max_players, v, v,
+                    ));
+                }
+                self.board.size = v;
+            }
+            ConfigGameOp::InitActPts(v) => {
+                for player in self.players.values_mut() {
+                    player.action_points = v;
+                }
+                self.config.init_action_points = v;
+            }
+            ConfigGameOp::InitLives(v) => {
+                for player in self.players.values_mut() {
+                    player.lives = v;
+                }
+                self.config.init_lives = v;
+            }
+            ConfigGameOp::InitRange(v) => {
+                for player in self.players.values_mut() {
+                    player.range = v;
+                }
+                self.config.init_range = v;
+            }
         };
         Ok(())
     }
@@ -264,10 +328,8 @@ impl Game {
         }
         let die = Uniform::from(0..self.board.size);
         for (k, player) in &mut self.players {
-            player.lives = 3;
-            player.action_points = 1;
             // set player's position randomly
-            if player.pos.x == usize::MAX {
+            if player.pos.x >= self.board.size || player.pos.y >= self.board.size {
                 let mut res = false;
                 while res == false {
                     let x = die.sample(rnd);
@@ -282,7 +344,7 @@ impl Game {
             }
         }
         self.phase = GamePhase::InProg;
-        self.turn_end_unix = from_now(self.turn_time_secs);
+        self.turn_end_unix = from_now(self.config.turn_time_secs);
         Ok(())
     }
 
@@ -312,7 +374,7 @@ impl Game {
                 player.action_points,
             ));
         }
-        self.turn_end_unix = from_now(self.turn_time_secs);
+        self.turn_end_unix = from_now(self.config.turn_time_secs);
         Ok(action_point_updates)
     }
 
@@ -370,7 +432,11 @@ impl Game {
                     player_flux.moveable_in_prog(&walk.pos)?;
                     // <EXECUTE>
                     player_flux.action_points -= 1;
-                };
+                } else if matches!(self.phase, GamePhase::Init) {
+                    if !matches!(self.config.init_pos, InitPosConfig::Manual) {
+                        return Err("manual initial positioning must be enabled".to_string());
+                    }
+                }
                 // <EXECUTE>
                 // remove user from current pos
                 if player_flux.pos.x != usize::MAX {

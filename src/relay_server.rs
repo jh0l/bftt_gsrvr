@@ -463,7 +463,7 @@ impl Handler<StartGame> for RelayServer {
                     Replenish {
                         game_id: game.game_id.clone(),
                     },
-                    Duration::from_secs(game.turn_time_secs),
+                    Duration::from_secs(game.config.turn_time_secs),
                 );
                 Ok(())
             });
@@ -574,7 +574,7 @@ impl Handler<Replenish> for RelayServer {
                 }
                 ctx.notify_later(
                     Replenish { game_id },
-                    Duration::from_secs(game.turn_time_secs as u64),
+                    Duration::from_secs(game.config.turn_time_secs),
                 );
                 Ok(())
             });
