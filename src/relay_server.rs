@@ -316,7 +316,7 @@ impl Handler<HostGame> for RelayServer {
         let mut new_game = false;
         // create game and set user as host and track in user_games, return err if host op failed
         if res_game.is_none() {
-            let mut game = Game::new(game_id.clone(), BOARD_SIZE);
+            let mut game = Game::new(game_id.clone(), BOARD_SIZE, self.rng.clone());
             let host_op = game.set_host(host_user_id.clone()).map(|_| ());
             if host_op.is_err() {
                 return MessageResult(host_op);
@@ -416,7 +416,7 @@ impl Handler<ConfigGame> for RelayServer {
                     return Err("only host can configure game".to_owned());
                 }
                 game.configure(&op)
-                    .map(|_| (MsgResult::conf_game(&game), game))
+                    .map(|res| (MsgResult::conf_game(&game, &res), game))
             })
             .and_then(|(msg_result, game)| {
                 let json = msg_result?;
@@ -435,7 +435,6 @@ impl Handler<StartGame> for RelayServer {
     fn handle(&mut self, msg: StartGame, ctx: &mut Context<Self>) -> Self::Result {
         let StartGame { game_id, user_id } = msg;
         let sessions = &self.sessions;
-        let rng = &mut self.rng;
         let res = self
             .games
             .get_mut(&game_id)
@@ -444,7 +443,7 @@ impl Handler<StartGame> for RelayServer {
                 if game.host_user_id != Some(user_id.clone()) {
                     return Err("Only host can start game".to_owned());
                 }
-                game.start_game(rng)
+                game.start_game()
                     .map(|_| (MsgResult::start_game(&game), game))
             })
             .and_then(|(msg_result, game)| {

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use rand::Rng;
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +44,13 @@ impl ActionPointUpdate {
         }
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum InitPosConfig {
+    Random,
+    Manual,
+    // RandomBlind,
+    // ManualSecret,
+}
 #[derive(Debug, Clone, Deserialize)]
 pub enum ConfigGameOp {
     TurnTimeSecs(u64),
@@ -50,6 +59,13 @@ pub enum ConfigGameOp {
     InitLives(u32),
     InitRange(usize),
     InitActPts(u32),
+    InitPos(InitPosConfig),
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GameConfigResult<'a> {
+    game: &'a Game,
+    result: &'a Option<HashMap<String, String>>,
 }
 
 pub struct MsgResult;
@@ -84,8 +100,12 @@ impl MsgResult {
         MsgResult::json_string("/player_joined", json)
     }
 
-    pub fn conf_game(conf: &Game) -> Result<String, String> {
-        MsgResult::json_string("/conf_game", conf)
+    pub fn conf_game(
+        game: &Game,
+        result: &Option<HashMap<String, String>>,
+    ) -> Result<String, String> {
+        let res = GameConfigResult { game, result };
+        MsgResult::json_string("/conf_game", &res)
     }
 
     pub fn start_game(game: &Game) -> Result<String, String> {

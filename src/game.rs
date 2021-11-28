@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::common::ConfigGameOp;
+use crate::common::{ConfigGameOp, InitPosConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
@@ -144,6 +144,8 @@ pub struct Game {
     pub board: Board,
     pub turn_end_unix: u64,
     pub config: GameConfig,
+    #[serde(skip_serializing)]
+    rnd: ThreadRng,
 }
 
 pub enum InsertPlayerResult {
@@ -224,14 +226,14 @@ impl GameConfig {
             max_players: MAX_PLAYERS,
             init_action_points: INIT_ACTION_POINTS,
             init_lives: INIT_LIVES,
-            init_pos: InitPosConfig::Manual,
+            init_pos: InitPosConfig::Random,
             turn_time_secs: TURN_TIME_SECS,
         }
     }
 }
 
 impl Game {
-    pub fn new(game_id: String, size: u16) -> Game {
+    pub fn new(game_id: String, size: u16, rnd: ThreadRng) -> Game {
         Game {
             phase: GamePhase::Init,
             game_id,
@@ -241,6 +243,7 @@ impl Game {
             board: Board::new(size as usize),
             turn_end_unix: 0,
             config: GameConfig::new(),
+            rnd,
         }
     }
 
@@ -254,22 +257,61 @@ impl Game {
             return Ok(InsertPlayerResult::Rejoined);
         }
         if matches!(self.phase, GamePhase::Init) {
+            // fail if game is full
+            if self.players.len() == usize::from(self.config.max_players) {
+                return Err("game is at max capacity".to_string());
+            }
             let mut player = Player::new(user_id.clone(), self.game_id.clone());
+            // set loadout
             player.lives = self.config.init_lives;
             player.action_points = self.config.init_action_points;
             player.range = self.config.init_range;
+            if matches!(self.config.init_pos, InitPosConfig::Random) {
+                // randomly position player
+                Game::randomly_position(&mut player, &self.die(), &mut self.rnd, &mut self.board);
+            }
+            // insert player
             self.players.insert(user_id.clone(), player);
             self.players_alive.insert(user_id.clone());
             return Ok(InsertPlayerResult::Joined);
         }
-        return Err("game unavailable".to_owned());
+        return Err("game cannot be joined".to_owned());
     }
 
-    pub fn configure(&mut self, conf: &ConfigGameOp) -> Result<(), String> {
+    /// set player's position randomly
+    pub fn randomly_position(
+        player: &mut Player,
+        die: &Uniform<usize>,
+        rnd: &mut ThreadRng,
+        board: &mut Board,
+    ) {
+        // remove player from current position
+        board.map.remove(&player.pos.key());
+        let mut res = false;
+        while res == false {
+            let x = die.sample(rnd);
+            let y = die.sample(rnd);
+            let pos = Pos { x, y };
+            if !board.map.contains_key(&pos.key()) {
+                board.map.insert(pos.key(), player.user_id.clone());
+                player.pos = pos;
+                res = true;
+            }
+        }
+    }
+
+    pub fn die(&self) -> Uniform<usize> {
+        Uniform::from(0..self.board.size)
+    }
+
+    pub fn configure(
+        &mut self,
+        conf: &ConfigGameOp,
+    ) -> Result<Option<HashMap<String, String>>, String> {
         if !matches!(self.phase, GamePhase::Init) {
             return Err("configuration must be during initialisation".to_string());
         }
-        match *conf {
+        match conf.clone() {
             ConfigGameOp::TurnTimeSecs(v) => {
                 if v < 10 {
                     return Err("minimum of 10 seconds is required".to_string());
@@ -318,29 +360,35 @@ impl Game {
                 }
                 self.config.init_range = v;
             }
+            ConfigGameOp::InitPos(v) => {
+                self.config.init_pos = v.clone();
+                if let InitPosConfig::Random = v {
+                    let mut res: HashMap<String, String> = HashMap::new();
+                    let die = self.die();
+                    for player in self.players.values_mut() {
+                        let pos = player.pos.clone();
+                        Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
+                        if pos != player.pos {
+                            res.insert(pos.key(), player.user_id.clone());
+                        }
+                    }
+                    if !res.is_empty() {
+                        return Ok(Some(res));
+                    }
+                }
+            }
         };
-        Ok(())
+        Ok(None)
     }
 
-    pub fn start_game(&mut self, rnd: &mut ThreadRng) -> Result<(), String> {
+    pub fn start_game(&mut self) -> Result<(), String> {
         if !matches!(self.phase, GamePhase::Init) {
             return Err("Game already started".to_owned());
         }
-        let die = Uniform::from(0..self.board.size);
-        for (k, player) in &mut self.players {
-            // set player's position randomly
+        let die = self.die();
+        for player in self.players.values_mut() {
             if player.pos.x >= self.board.size || player.pos.y >= self.board.size {
-                let mut res = false;
-                while res == false {
-                    let x = die.sample(rnd);
-                    let y = die.sample(rnd);
-                    let pos = Pos { x, y };
-                    if !self.board.map.contains_key(&pos.key()) {
-                        self.board.map.insert(pos.key(), k.clone());
-                        player.pos = pos;
-                        res = true;
-                    }
-                }
+                Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
             }
         }
         self.phase = GamePhase::InProg;
