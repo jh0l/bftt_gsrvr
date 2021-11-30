@@ -117,13 +117,7 @@ pub enum GamePhase {
     InProg,
     End,
 }
-#[derive(Debug, Clone, Serialize)]
-pub enum InitPosConfig {
-    Random,
-    Manual,
-    RandomBlind,
-    ManualSecret,
-}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct GameConfig {
     pub turn_time_secs: u64,
@@ -156,7 +150,7 @@ pub enum InsertPlayerResult {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct AttackAction {
     target_user_id: String,
-    lives_effect: i8,
+    lives_effect: u32,
 }
 #[derive(Deserialize, Serialize, Debug)]
 pub struct GiveAction {
@@ -168,11 +162,16 @@ pub struct MoveAction {
 }
 #[derive(Deserialize, Serialize, Debug)]
 pub struct RangeUpgradeAction {
-    point_cost: i8,
+    point_cost: u32,
 }
 #[derive(Deserialize, Serialize, Debug)]
 pub struct HealAction {
-    point_cost: i8,
+    point_cost: u32,
+}
+#[derive(Deserialize, Serialize, Debug)]
+pub struct ReviveAction {
+    target_user_id: String,
+    point_cost: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -182,6 +181,7 @@ pub enum ActionType {
     Move(MoveAction),
     RangeUpgrade(RangeUpgradeAction),
     Heal(HealAction),
+    Revive(ReviveAction),
 }
 
 #[derive(Deserialize, Debug)]
@@ -203,6 +203,7 @@ pub enum ActionTypeEvent {
     Move(MoveEvent),
     RangeUpgrade(RangeUpgradeAction),
     Heal(HealAction),
+    Revive(ReviveAction),
 }
 #[derive(Serialize, Debug)]
 pub struct PlayerResponse {
@@ -212,12 +213,19 @@ pub struct PlayerResponse {
     phase: GamePhase,
 }
 
-pub const TURN_TIME_SECS: u64 = 60;
+pub const TURN_TIME_SECS: u64 = 10;
 pub const MAX_PLAYERS: u16 = 13;
-pub const BOARD_SIZE: u16 = 20;
+pub const BOARD_SIZE: u16 = 12;
 pub const INIT_RANGE: usize = 2;
 pub const INIT_ACTION_POINTS: u32 = 1;
 pub const INIT_LIVES: u32 = 3;
+
+// non user-configurable parameters
+pub const MOVE_COST: u32 = 1;
+pub const ATTACK_LIVES_EFFECT: u32 = 1;
+pub const ATTACK_COST: u32 = 1;
+pub const RANGE_UPGRADE_COST: u32 = 3;
+pub const HEAL_COST: u32 = 3;
 
 impl GameConfig {
     pub fn new() -> GameConfig {
@@ -465,7 +473,7 @@ impl Game {
         }
         let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
         let mut player_flux = self.clone_player(user_id)?;
-        let action: ActionTypeEvent = match &action {
+        let action: ActionTypeEvent = match action {
             ActionType::Move(walk) => {
                 // <VALIDATE>
                 // validate bounds
@@ -479,7 +487,7 @@ impl Game {
                     // validate move distance against range ability
                     player_flux.moveable_in_prog(&walk.pos)?;
                     // <EXECUTE>
-                    player_flux.action_points -= 1;
+                    player_flux.action_points -= MOVE_COST;
                 } else if matches!(self.phase, GamePhase::Init) {
                     if !matches!(self.config.init_pos, InitPosConfig::Manual) {
                         return Err("manual initial positioning must be enabled".to_string());
@@ -523,17 +531,25 @@ impl Game {
                 // player in range of target
                 player_flux.moveable_in_prog(&target_flux.pos)?;
                 // action's lives effect is -1
-                if attack.lives_effect != -1 {
+                if attack.lives_effect != ATTACK_LIVES_EFFECT {
                     return Err("attacking must take 1 life :'(".to_string());
                 }
                 // remove player action point
-                player_flux.action_points -= 1;
+                player_flux.action_points -= ATTACK_COST;
                 // remove target life
-                target_flux.lives -= 1;
+                target_flux.lives -= ATTACK_LIVES_EFFECT;
                 // if target life is 0 then check number of players alive
                 // if players alive is 1 then end game
                 if target_flux.lives == 0 {
                     self.players_alive.remove(&target_flux.user_id);
+                    // transfer remaining action points to attacker
+                    player_flux.action_points += target_flux.action_points;
+                    target_flux.action_points = 0;
+                    action_point_updates.push((
+                        target_flux.user_id.clone(),
+                        self.game_id.clone(),
+                        0,
+                    ));
                     if self.players_alive.len() == 1 {
                         self.phase = GamePhase::End;
                     }
@@ -551,7 +567,7 @@ impl Game {
             }
             ActionType::Give(give) => {
                 // <VALIDATE>
-                // game in progress
+                // game must be in progress
                 self.check_in_prog()?;
                 // player is not targeting themselves
                 if user_id == give.target_user_id {
@@ -584,17 +600,22 @@ impl Game {
             }
             ActionType::RangeUpgrade(range_upgrade) => {
                 // <VALIDATE>
-                // game in progress
+                // game must be in progress
                 self.check_in_prog()?;
                 // player has lives
                 player_flux.has_lives()?;
                 // player has enough action points and correct cost estimate
-                if player_flux.action_points < 3 || range_upgrade.point_cost != 3 {
-                    return Err("3 action points required to upgrade range".to_string());
+                if player_flux.action_points < RANGE_UPGRADE_COST
+                    || range_upgrade.point_cost != RANGE_UPGRADE_COST
+                {
+                    return Err(format!(
+                        "{} action points required to upgrade range",
+                        RANGE_UPGRADE_COST
+                    ));
                 }
                 // <EXECUTE>
                 // exchange action points for range
-                player_flux.action_points -= 3;
+                player_flux.action_points -= RANGE_UPGRADE_COST;
                 player_flux.range += 1;
                 // return action event
                 ActionTypeEvent::RangeUpgrade(RangeUpgradeAction {
@@ -603,20 +624,52 @@ impl Game {
             }
             ActionType::Heal(heal) => {
                 // <VALIDATE>
-                // game in progress
+                // game must be in progress
                 self.check_in_prog()?;
                 // player has lives
                 player_flux.has_lives()?;
-                if player_flux.action_points < 3 || heal.point_cost != 3 {
-                    return Err("3 action points required to upgrade range".to_string());
+                if player_flux.action_points < HEAL_COST || heal.point_cost != HEAL_COST {
+                    return Err(format!(
+                        "{} action points required to heal",
+                        RANGE_UPGRADE_COST
+                    ));
                 }
                 // <EXECUTE>
                 // exchange action points for life
-                player_flux.action_points -= 3;
+                player_flux.action_points -= HEAL_COST;
                 player_flux.lives += 1;
                 // return action event
                 ActionTypeEvent::Heal(HealAction {
                     point_cost: heal.point_cost,
+                })
+            }
+            ActionType::Revive(rev) => {
+                // <VALIDATE>
+                // game must be in progress
+                let ReviveAction {
+                    point_cost,
+                    target_user_id,
+                } = rev;
+                self.check_in_prog()?;
+                // player has lives
+                player_flux.has_lives()?;
+                let mut target_flux = self.clone_player(&target_user_id)?;
+                // target must be dead
+                if target_flux.lives > 0 {
+                    return Err("target player must be dead".to_string());
+                }
+                // <EXECUTE>
+                // apply target_copy
+                player_flux.lives -= 1;
+                target_flux.lives += 1;
+                self.players_alive.insert(target_flux.user_id.clone());
+                self.players
+                    .insert(target_flux.user_id.clone(), target_flux);
+                ActionTypeEvent::Revive({
+                    ReviveAction {
+                        target_user_id,
+                        point_cost,
+                    }
                 })
             }
         };

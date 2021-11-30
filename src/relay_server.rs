@@ -322,14 +322,25 @@ impl Handler<HostGame> for RelayServer {
                 return MessageResult(host_op);
             }
             self.games.insert(game_id.clone(), game.clone());
-            self.user_games.insert(host_user_id.clone(), game_id);
+            self.user_games
+                .insert(host_user_id.clone(), game_id.clone());
             res_game = Some(game);
             new_game = true;
         }
         // send json response to client (serialization can fail)
-        let res = MsgResult::host_game(&res_game.expect("res_game is handled"))
+        let game = res_game.expect("res_game is handled");
+        let res = MsgResult::host_game(&game)
             .map(|msg_result| {
                 self.sessions.send_user(&host_user_id, &msg_result);
+                // send action points update to host
+                let apu = ActionPointUpdate::new(
+                    &host_user_id,
+                    &game_id,
+                    game.players[&host_user_id].action_points,
+                );
+                let apu_msg = MsgResult::action_point_update(&apu)
+                    .unwrap_or_else(|e| MsgResult::error("joined action_point_update", &e));
+                self.sessions.send_user(&host_user_id, &apu_msg);
                 let alert = if new_game {
                     MsgResult::alert("new game created")
                 } else {
