@@ -68,6 +68,12 @@ struct GameConfigResult<'a> {
     result: &'a Option<HashMap<String, String>>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct GameTurnEndUnix {
+    game_id: String,
+    turn_end_unix: u64,
+}
+
 pub struct MsgResult;
 
 impl MsgResult {
@@ -114,6 +120,14 @@ impl MsgResult {
 
     pub fn action_point_update(apu: &ActionPointUpdate) -> Result<String, String> {
         MsgResult::json_string("/action_point_update", apu)
+    }
+
+    pub fn turn_end_unix(game: &Game) -> Result<String, String> {
+        let res = GameTurnEndUnix {
+            game_id: game.game_id.clone(),
+            turn_end_unix: game.turn_end_unix,
+        };
+        MsgResult::json_string("/turn_end_unix", &res)
     }
 
     pub fn user_status(user_status: &UserStatusResult) -> Result<String, String> {

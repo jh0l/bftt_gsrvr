@@ -577,10 +577,15 @@ impl Handler<Replenish> for RelayServer {
             })
             .and_then(|(game, apu)| {
                 for (uid, gid, ap) in apu {
+                    // send action point updates to player
                     let apu = ActionPointUpdate::new(&uid, &gid, ap);
                     let msg = MsgResult::action_point_update(&apu)
                         .unwrap_or_else(|e| MsgResult::alert(&e));
                     sessions.send_user(&uid, &msg);
+                    // send new turn end time to player
+                    let turn_end_time =
+                        MsgResult::turn_end_unix(&game).unwrap_or_else(|e| MsgResult::alert(&e));
+                    sessions.send_user(&uid, &turn_end_time);
                 }
                 ctx.notify_later(
                     Replenish { game_id },
