@@ -391,7 +391,10 @@ impl Game {
 
     pub fn start_game(&mut self) -> Result<(), String> {
         if !matches!(self.phase, GamePhase::Init) {
-            return Err("Game already started".to_owned());
+            return Err("game already started".to_owned());
+        }
+        if self.players.len() < 2 {
+            return Err("2 or more players required to start a game".to_owned());
         }
         let die = self.die();
         for player in self.players.values_mut() {
