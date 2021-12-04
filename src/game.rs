@@ -213,6 +213,12 @@ pub struct PlayerResponse {
     phase: GamePhase,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct PlayerActionResult {
+    pub action_point_updates: Vec<(String, String, u32)>,
+    pub players_alive: Option<HashSet<String>>,
+}
+
 pub const TURN_TIME_SECS: u64 = 10;
 pub const MAX_PLAYERS: u16 = 13;
 pub const BOARD_SIZE: u16 = 12;
@@ -393,8 +399,8 @@ impl Game {
         if !matches!(self.phase, GamePhase::Init) {
             return Err("game already started".to_owned());
         }
-        if self.players.len() < 2 {
-            return Err("2 or more players required to start a game".to_owned());
+        if self.players.len() < 4 {
+            return Err("4 or more players required to start a game".to_owned());
         }
         let die = self.die();
         for player in self.players.values_mut() {
@@ -470,11 +476,12 @@ impl Game {
         &mut self,
         user_id: &str,
         action: ActionType,
-    ) -> Result<(PlayerResponse, Vec<(String, String, u32)>), String> {
+    ) -> Result<(PlayerResponse, PlayerActionResult), String> {
         if matches!(self.phase, GamePhase::End) {
             return Err("game over".to_string());
         }
         let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
+        let mut players_alive = None;
         let mut player_flux = self.clone_player(user_id)?;
         let action: ActionTypeEvent = match action {
             ActionType::Move(walk) => {
@@ -556,6 +563,7 @@ impl Game {
                     if self.players_alive.len() == 1 {
                         self.phase = GamePhase::End;
                     }
+                    players_alive = Some(self.players_alive.clone());
                 }
                 // assign end phase if move ends the game
                 self.check_for_end_phase_move(&target_flux.user_id)?;
@@ -666,6 +674,10 @@ impl Game {
                 player_flux.lives -= 1;
                 target_flux.lives += 1;
                 self.players_alive.insert(target_flux.user_id.clone());
+                if player_flux.lives < 1 {
+                    self.players_alive.remove(&player_flux.user_id);
+                }
+                players_alive = Some(self.players_alive.clone());
                 self.players
                     .insert(target_flux.user_id.clone(), target_flux);
                 ActionTypeEvent::Revive({
@@ -692,7 +704,10 @@ impl Game {
                 phase: self.phase.clone(),
                 action,
             },
-            action_point_updates,
+            PlayerActionResult {
+                action_point_updates,
+                players_alive,
+            },
         ))
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rand::Rng;
 
@@ -74,6 +74,12 @@ struct GameTurnEndUnix {
     turn_end_unix: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct PlayersAliveUpdate {
+    game_id: String,
+    alive: HashSet<String>,
+}
+
 pub struct MsgResult;
 
 impl MsgResult {
@@ -136,6 +142,14 @@ impl MsgResult {
 
     pub fn player_action(action: &PlayerResponse) -> Result<String, String> {
         MsgResult::json_string("/player_action", action)
+    }
+
+    pub fn players_alive_update(alive: &HashSet<String>, game_id: &str) -> Result<String, String> {
+        let res = PlayersAliveUpdate {
+            alive: alive.clone(),
+            game_id: game_id.to_owned(),
+        };
+        MsgResult::json_string("/players_alive_update", &res)
     }
 
     pub fn error(context: &str, msg: &str) -> String {

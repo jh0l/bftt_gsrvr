@@ -9,6 +9,7 @@ use crate::game::ActionType;
 use crate::game::Game;
 use crate::game::InsertPlayerResult;
 use crate::game::Player;
+use crate::game::PlayerActionResult;
 use crate::game::BOARD_SIZE;
 use actix::prelude::*;
 use rand::prelude::ThreadRng;
@@ -547,13 +548,22 @@ impl Handler<PlayerActionRequest> for RelayServer {
             });
         match res {
             Err(e) => sessions.send_user(&user_id, &MsgResult::error("player_action", &e)),
-            Ok((json, game, apu_user_ids)) => {
+            Ok((json, game, par)) => {
+                let PlayerActionResult {
+                    action_point_updates,
+                    players_alive,
+                } = par;
                 // send action point updates
-                for (uid, gid, ap) in apu_user_ids {
+                for (uid, gid, ap) in action_point_updates {
                     let apu = ActionPointUpdate::new(&uid, &gid, ap);
                     let msg = MsgResult::action_point_update(&apu)
                         .unwrap_or_else(|e| MsgResult::alert(&e));
                     sessions.send_user(&uid, &msg);
+                }
+                if let Some(alive_set) = players_alive {
+                    let msg = MsgResult::players_alive_update(&alive_set, &game.game_id)
+                        .unwrap_or_else(|e| MsgResult::alert(&e));
+                    sessions.send_all(game.players.keys(), &msg);
                 }
                 // send game updates
                 self.sessions.send_all(game.players.keys(), &json)
