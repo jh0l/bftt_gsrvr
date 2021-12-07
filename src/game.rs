@@ -58,9 +58,16 @@ impl Player {
         }
     }
 
-    pub fn has_lives(&self) -> Result<(), String> {
+    pub fn is_alive(&self) -> Result<(), String> {
         if self.lives < 1 {
             return Err(format!("{} has no life", self.user_id));
+        }
+        Ok(())
+    }
+
+    pub fn is_dead(&self) -> Result<(), String> {
+        if self.lives > 0 {
+            return Err(format!("{} is alive", self.user_id));
         }
         Ok(())
     }
@@ -112,6 +119,153 @@ impl Board {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PlayersAliveDead {
+    alive: HashSet<String>,
+    dead: HashSet<String>,
+}
+
+impl PlayersAliveDead {
+    pub fn new() -> PlayersAliveDead {
+        PlayersAliveDead {
+            alive: HashSet::new(),
+            dead: HashSet::new(),
+        }
+    }
+
+    pub fn set_alive(&mut self, id: &str) {
+        self.alive.insert(id.to_owned());
+        self.dead.remove(id);
+    }
+
+    pub fn set_dead(&mut self, id: &str) {
+        self.dead.insert(id.to_string());
+        self.alive.remove(id);
+    }
+
+    pub fn alive_len(&self) -> usize {
+        self.alive.len()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Election {
+    name: String,
+    candidates: HashSet<String>,
+    voters: HashSet<String>,
+    vote_count: HashMap<String, HashSet<String>>,
+    voter_vote: HashMap<String, String>,
+}
+
+impl Election {
+    pub fn new(name: String) -> Election {
+        Election {
+            name,
+            candidates: HashSet::new(),
+            voters: HashSet::new(),
+            vote_count: HashMap::new(),
+            voter_vote: HashMap::new(),
+        }
+    }
+
+    pub fn remove_vote(&mut self, voter_id: &str) -> Result<(), String> {
+        if let Some(old_c_id) = self.voter_vote.get(voter_id) {
+            self.vote_count.get_mut(old_c_id).and_then(|v| {
+                v.remove(voter_id);
+                Some(())
+            });
+        }
+        // insert voter's vote in voter vote
+        self.voter_vote.remove(voter_id);
+        Ok(())
+    }
+
+    pub fn vote(&mut self, voter_id: &str, candidate_id: &str) -> Result<(), String> {
+        // <VALIDATE>
+        // voter must be in voters
+        if !self.voters.contains(voter_id) {
+            return Err(format!("player cannot vote in {}", self.name).to_string());
+        }
+        // candidate must be in candidates
+        if !self.candidates.contains(candidate_id) {
+            return Err(
+                format!("{} is not a candidate in {}", candidate_id, self.name).to_string(),
+            );
+        }
+        // remove old vote if it exists
+        if let Some(old_c_id) = self.voter_vote.get(voter_id) {
+            self.vote_count.get_mut(old_c_id).and_then(|v| {
+                v.remove(voter_id);
+                Some(())
+            });
+        }
+        // insert voter's vote in candidate vote count
+        if let None = self.vote_count.get(candidate_id) {
+            self.vote_count
+                .insert(candidate_id.to_string(), HashSet::new());
+        }
+        if let Some(count) = self.vote_count.get_mut(candidate_id) {
+            count.insert(voter_id.to_string());
+        }
+        // insert voter's vote in voter vote
+        self.voter_vote
+            .insert(voter_id.to_string(), candidate_id.to_string());
+        Ok(())
+    }
+
+    /// convert voter to candidate
+    pub fn convert_voter(&mut self, voter_id: &str) -> Result<(), String> {
+        self.voters.remove(voter_id);
+        self.candidates.insert(voter_id.to_string());
+        self.voter_vote.remove(voter_id).and_then(|candidate_id| {
+            self.vote_count.get_mut(&candidate_id).and_then(|vc| {
+                vc.remove(voter_id);
+                Some(())
+            });
+            Some(())
+        });
+        Ok(())
+    }
+
+    /// convert candidate to voter
+    pub fn convert_candidate(&mut self, candidate_id: &str) {
+        self.candidates.remove(candidate_id);
+        self.voters.insert(candidate_id.to_string());
+        self.vote_count.remove(candidate_id);
+        // TODO remove candidate from voter_votes and notify voters
+    }
+
+    /// get a voter's vote if any
+    pub fn get_voter_vote(&self, voter_id: &str) -> Option<String> {
+        self.voter_vote
+            .get(voter_id)
+            .and_then(|f| Some(f.to_owned()))
+    }
+
+    /// get winning candidates
+    pub fn redeem(&self) -> HashSet<String> {
+        // candidates must have at least 1 vote, candidates with empty hashsets are ignored
+        let mut len = 1;
+        let mut res: HashSet<String> = HashSet::new();
+        for (k, v) in &self.vote_count {
+            if v.len() == len {
+                res.insert(k.to_owned());
+            } else if v.len() > len {
+                res = HashSet::new();
+                res.insert(k.to_owned());
+                len = v.len();
+            }
+        }
+        res
+    }
+
+    /// reset votes
+    pub fn reset(&mut self) {
+        self.vote_count = HashMap::new();
+        self.voter_vote = HashMap::new();
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub enum GamePhase {
     Init,
     InProg,
@@ -134,12 +288,14 @@ pub struct Game {
     pub phase: GamePhase,
     pub host_user_id: Option<String>,
     pub players: HashMap<String, Player>,
-    pub players_alive: HashSet<String>,
+    pub players_alive_dead: PlayersAliveDead,
     pub board: Board,
     pub turn_end_unix: u64,
     pub config: GameConfig,
     #[serde(skip_serializing)]
     rnd: ThreadRng,
+    #[serde(skip_serializing)]
+    pub curse_election: Election,
 }
 
 pub enum InsertPlayerResult {
@@ -174,6 +330,11 @@ pub struct ReviveAction {
     point_cost: u32,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+pub struct CurseAction {
+    target_user_id: Option<String>,
+}
+
 #[derive(Deserialize, Debug)]
 pub enum ActionType {
     Attack(AttackAction),
@@ -182,6 +343,7 @@ pub enum ActionType {
     RangeUpgrade(RangeUpgradeAction),
     Heal(HealAction),
     Revive(ReviveAction),
+    Curse(CurseAction),
 }
 
 #[derive(Deserialize, Debug)]
@@ -204,7 +366,9 @@ pub enum ActionTypeEvent {
     RangeUpgrade(RangeUpgradeAction),
     Heal(HealAction),
     Revive(ReviveAction),
+    Curse(CurseAction),
 }
+
 #[derive(Serialize, Debug)]
 pub struct PlayerResponse {
     user_id: String,
@@ -216,12 +380,12 @@ pub struct PlayerResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct PlayerActionResult {
     pub action_point_updates: Vec<(String, String, u32)>,
-    pub players_alive: Option<HashSet<String>>,
+    pub players_alive_dead: Option<PlayersAliveDead>,
 }
 
 pub const TURN_TIME_SECS: u64 = 10;
 pub const MAX_PLAYERS: u16 = 13;
-pub const BOARD_SIZE: u16 = 12;
+pub const BOARD_SIZE: u16 = 10;
 pub const INIT_RANGE: usize = 2;
 pub const INIT_ACTION_POINTS: u32 = 1;
 pub const INIT_LIVES: u32 = 3;
@@ -253,11 +417,12 @@ impl Game {
             game_id,
             host_user_id: None,
             players: HashMap::new(),
-            players_alive: HashSet::new(),
+            players_alive_dead: PlayersAliveDead::new(),
             board: Board::new(size as usize),
             turn_end_unix: 0,
             config: GameConfig::new(),
             rnd,
+            curse_election: Election::new("cursings".to_string()),
         }
     }
 
@@ -286,7 +451,7 @@ impl Game {
             }
             // insert player
             self.players.insert(user_id.clone(), player);
-            self.players_alive.insert(user_id.clone());
+            self.players_alive_dead.set_alive(&user_id);
             return Ok(InsertPlayerResult::Joined);
         }
         return Err("game cannot be joined".to_owned());
@@ -408,6 +573,7 @@ impl Game {
                 Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
             }
         }
+        self.curse_election.candidates = self.players_alive_dead.alive.clone();
         self.phase = GamePhase::InProg;
         self.turn_end_unix = from_now(self.config.turn_time_secs);
         Ok(())
@@ -426,12 +592,18 @@ impl Game {
         Ok(())
     }
 
-    pub fn replenish(&mut self) -> Result<Vec<(String, String, u32)>, String> {
+    /// redeem curse election results, replenish living players
+    pub fn replenish(
+        &mut self,
+        cursed: &HashSet<String>,
+    ) -> Result<Vec<(String, String, u32)>, String> {
         self.check_in_prog()?;
         let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
         for player in self.players.values_mut() {
-            if player.lives > 0 {
-                player.action_points += 1;
+            if !cursed.contains(&player.user_id) {
+                if player.lives > 0 {
+                    player.action_points += 1;
+                }
             }
             action_point_updates.push((
                 player.user_id.clone(),
@@ -460,8 +632,8 @@ impl Game {
             .lives
             == 0
         {
-            self.players_alive.remove(player_id);
-            if self.players_alive.len() == 1 {
+            // TODO change to PRESET? 3 players for jury to vote on 1,2,3
+            if self.players_alive_dead.alive_len() == 1 {
                 self.phase = GamePhase::End;
             }
         }
@@ -475,13 +647,13 @@ impl Game {
     pub fn player_action(
         &mut self,
         user_id: &str,
-        action: ActionType,
+        action: &ActionType,
     ) -> Result<(PlayerResponse, PlayerActionResult), String> {
         if matches!(self.phase, GamePhase::End) {
             return Err("game over".to_string());
         }
         let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
-        let mut players_alive = None;
+        let mut players_alive_dead = None;
         let mut player_flux = self.clone_player(user_id)?;
         let action: ActionTypeEvent = match action {
             ActionType::Move(walk) => {
@@ -491,7 +663,7 @@ impl Game {
                 self.board.in_bounds(&walk.pos, true)?;
                 if matches!(self.phase, GamePhase::InProg) {
                     // validate lives
-                    player_flux.has_lives()?;
+                    player_flux.is_alive()?;
                     // validate action points
                     // validate player range ability
                     // validate move distance against range ability
@@ -532,11 +704,11 @@ impl Game {
                     return Err("Stop hurting yourself".to_string());
                 }
                 // validate player has lives
-                player_flux.has_lives()?;
+                player_flux.is_alive()?;
 
                 let mut target_flux = self.clone_player(&attack.target_user_id)?;
                 // validate target is alive
-                target_flux.has_lives()?;
+                target_flux.is_alive()?;
                 // has action points
                 // player in range of target
                 player_flux.moveable_in_prog(&target_flux.pos)?;
@@ -551,7 +723,8 @@ impl Game {
                 // if target life is 0 then check number of players alive
                 // if players alive is 1 then end game
                 if target_flux.lives == 0 {
-                    self.players_alive.remove(&target_flux.user_id);
+                    self.players_alive_dead.set_dead(&target_flux.user_id);
+                    self.curse_election.convert_candidate(&target_flux.user_id);
                     // transfer remaining action points to attacker
                     player_flux.action_points += target_flux.action_points;
                     target_flux.action_points = 0;
@@ -560,10 +733,10 @@ impl Game {
                         self.game_id.clone(),
                         0,
                     ));
-                    if self.players_alive.len() == 1 {
+                    if self.players_alive_dead.alive_len() == 1 {
                         self.phase = GamePhase::End;
                     }
-                    players_alive = Some(self.players_alive.clone());
+                    players_alive_dead = Some(self.players_alive_dead.clone());
                 }
                 // assign end phase if move ends the game
                 self.check_for_end_phase_move(&target_flux.user_id)?;
@@ -585,10 +758,10 @@ impl Game {
                     return Err("this is a futile endeavour".to_string());
                 }
                 // player has lives
-                player_flux.has_lives()?;
+                player_flux.is_alive()?;
                 // target has lives
                 let mut target_flux = self.clone_player(&give.target_user_id)?;
-                target_flux.has_lives()?;
+                target_flux.is_alive()?;
                 // player has action points
                 // player in range of target
                 player_flux.moveable_in_prog(&target_flux.pos)?;
@@ -614,7 +787,7 @@ impl Game {
                 // game must be in progress
                 self.check_in_prog()?;
                 // player has lives
-                player_flux.has_lives()?;
+                player_flux.is_alive()?;
                 // player has enough action points and correct cost estimate
                 if player_flux.action_points < RANGE_UPGRADE_COST
                     || range_upgrade.point_cost != RANGE_UPGRADE_COST
@@ -638,7 +811,7 @@ impl Game {
                 // game must be in progress
                 self.check_in_prog()?;
                 // player has lives
-                player_flux.has_lives()?;
+                player_flux.is_alive()?;
                 if player_flux.action_points < HEAL_COST || heal.point_cost != HEAL_COST {
                     return Err(format!(
                         "{} action points required to heal",
@@ -662,30 +835,55 @@ impl Game {
                     target_user_id,
                 } = rev;
                 self.check_in_prog()?;
+                if user_id == target_user_id {
+                    return Err("you can't revive yourself".to_string());
+                }
                 // player has lives
-                player_flux.has_lives()?;
+                player_flux.is_alive()?;
                 let mut target_flux = self.clone_player(&target_user_id)?;
                 // target must be dead
-                if target_flux.lives > 0 {
-                    return Err("target player must be dead".to_string());
-                }
+                target_flux.is_dead()?;
                 // <EXECUTE>
                 // apply target_copy
                 player_flux.lives -= 1;
                 target_flux.lives += 1;
-                self.players_alive.insert(target_flux.user_id.clone());
+                self.players_alive_dead.set_alive(&target_flux.user_id);
+                self.curse_election.convert_voter(&target_flux.user_id)?;
                 if player_flux.lives < 1 {
-                    self.players_alive.remove(&player_flux.user_id);
+                    self.players_alive_dead.set_dead(&player_flux.user_id);
+                    self.curse_election.convert_candidate(&player_flux.user_id);
                 }
-                players_alive = Some(self.players_alive.clone());
+                players_alive_dead = Some(self.players_alive_dead.clone());
                 self.players
                     .insert(target_flux.user_id.clone(), target_flux);
                 ActionTypeEvent::Revive({
                     ReviveAction {
-                        target_user_id,
-                        point_cost,
+                        target_user_id: target_user_id.to_string(),
+                        point_cost: point_cost.clone(),
                     }
                 })
+            }
+            ActionType::Curse(curse) => {
+                let CurseAction { target_user_id } = curse;
+                // <VALIDATE>
+                self.check_in_prog()?;
+
+                player_flux.is_dead()?;
+                let res = if let Some(target_user_id) = target_user_id {
+                    let target_flux = self.clone_player(&target_user_id)?;
+                    target_flux.is_alive()?;
+                    // <EXECUTE>
+                    self.curse_election.vote(&user_id, &target_user_id)?;
+                    ActionTypeEvent::Curse(CurseAction {
+                        target_user_id: Some(target_user_id.to_string()),
+                    })
+                } else {
+                    self.curse_election.remove_vote(user_id)?;
+                    ActionTypeEvent::Curse(CurseAction {
+                        target_user_id: None,
+                    })
+                };
+                res
             }
         };
         // add player to action point update list
@@ -706,9 +904,21 @@ impl Game {
             },
             PlayerActionResult {
                 action_point_updates,
-                players_alive,
+                players_alive_dead,
             },
         ))
+    }
+
+    pub fn get_player_action(&self, player_id: &str) -> PlayerResponse {
+        // TODO match arm for all types of ActionTypeEvent
+        PlayerResponse {
+            action: ActionTypeEvent::Curse(CurseAction {
+                target_user_id: self.curse_election.get_voter_vote(player_id),
+            }),
+            user_id: player_id.to_string(),
+            game_id: self.game_id.to_string(),
+            phase: self.phase.clone(),
+        }
     }
 }
 

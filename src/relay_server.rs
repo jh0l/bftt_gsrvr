@@ -187,6 +187,24 @@ impl RelayServerSessions {
             self.send_user(k, msg);
         }
     }
+
+    pub fn send_player_game_data(&self, user_id: String, game: &Game) {
+        // send action points update to host
+        let game_id = game.game_id.clone();
+        let apu = ActionPointUpdate::new(&user_id, &game_id, game.players[&user_id].action_points);
+        let apu_msg = MsgResult::action_point_update(&apu)
+            .unwrap_or_else(|e| MsgResult::error("joined action_point_update", &e));
+        self.send_user(&user_id, &apu_msg);
+        // // send alive dead update
+        // let alive_dead_set = &game.players_alive_dead;
+        // let pad_msg = MsgResult::players_alive_update(&alive_dead_set, &game.game_id)
+        //     .unwrap_or_else(|e| MsgResult::alert(&e));
+        // self.send_user(&user_id, &pad_msg);
+        // send curse vote status
+        let curse_msg = MsgResult::player_action(&game.get_player_action(&user_id))
+            .unwrap_or_else(|e| MsgResult::error("curse_vote_status", &e));
+        self.send_user(&user_id, &curse_msg);
+    }
 }
 
 /// Make actor from `RelaySever`
@@ -333,15 +351,10 @@ impl Handler<HostGame> for RelayServer {
         let res = MsgResult::host_game(&game)
             .map(|msg_result| {
                 self.sessions.send_user(&host_user_id, &msg_result);
-                // send action points update to host
-                let apu = ActionPointUpdate::new(
-                    &host_user_id,
-                    &game_id,
-                    game.players[&host_user_id].action_points,
-                );
-                let apu_msg = MsgResult::action_point_update(&apu)
-                    .unwrap_or_else(|e| MsgResult::error("joined action_point_update", &e));
-                self.sessions.send_user(&host_user_id, &apu_msg);
+                // send player all secret game data
+                self.sessions
+                    .send_player_game_data(host_user_id.clone(), &game);
+                // send alert
                 let alert = if new_game {
                     MsgResult::alert("new game created")
                 } else {
@@ -397,14 +410,8 @@ impl Handler<JoinGame> for RelayServer {
                     .unwrap_or_else(|e| MsgResult::error("join_game", &e));
                 // send game json to player that joined (or rejoined)
                 sessions.send_user(&user_id, &msg);
-                let apu = ActionPointUpdate::new(
-                    &user_id,
-                    &game_id,
-                    game.players[&user_id].action_points,
-                );
-                let apu_msg = MsgResult::action_point_update(&apu)
-                    .unwrap_or_else(|e| MsgResult::error("joined action_point_update", &e));
-                sessions.send_user(&user_id, &apu_msg);
+                // send player secret game data
+                sessions.send_player_game_data(user_id.clone(), &game);
                 Ok(())
             });
         MessageResult(res)
@@ -514,6 +521,7 @@ impl Handler<PlayerActionRequest> for RelayServer {
             game_id,
             action,
         } = msg;
+        let mut secret_action = false;
         let sessions = &self.sessions;
         let games = &mut self.games;
         let user_games = &mut self.user_games;
@@ -527,7 +535,7 @@ impl Handler<PlayerActionRequest> for RelayServer {
                 games.get_mut(&game_id).ok_or("game id bad".to_string())
             })
             .and_then(|game| {
-                game.player_action(&user_id, action).map(|e| {
+                game.player_action(&user_id, &action).map(|e| {
                     // if game is over then remove user_games entry for all players in the game
                     // stops users from being locked into the game
                     if game.is_end_phase() {
@@ -539,6 +547,11 @@ impl Handler<PlayerActionRequest> for RelayServer {
                             });
                         }
                     }
+                    // determine whether game update is sent to every player
+                    secret_action = match action {
+                        ActionType::Curse(_) => true,
+                        _ => false,
+                    };
                     (e, game)
                 })
             })
@@ -551,7 +564,7 @@ impl Handler<PlayerActionRequest> for RelayServer {
             Ok((json, game, par)) => {
                 let PlayerActionResult {
                     action_point_updates,
-                    players_alive,
+                    players_alive_dead,
                 } = par;
                 // send action point updates
                 for (uid, gid, ap) in action_point_updates {
@@ -560,13 +573,18 @@ impl Handler<PlayerActionRequest> for RelayServer {
                         .unwrap_or_else(|e| MsgResult::alert(&e));
                     sessions.send_user(&uid, &msg);
                 }
-                if let Some(alive_set) = players_alive {
-                    let msg = MsgResult::players_alive_update(&alive_set, &game.game_id)
+                // send alive dead list updates
+                if let Some(alive_dead_set) = players_alive_dead {
+                    let msg = MsgResult::players_alive_update(&alive_dead_set, &game.game_id)
                         .unwrap_or_else(|e| MsgResult::alert(&e));
                     sessions.send_all(game.players.keys(), &msg);
                 }
-                // send game updates
-                self.sessions.send_all(game.players.keys(), &json)
+                if !secret_action {
+                    // send game updates
+                    sessions.send_all(game.players.keys(), &json)
+                } else {
+                    sessions.send_user(&user_id, &json);
+                }
             }
         };
     }
@@ -582,7 +600,9 @@ impl Handler<Replenish> for RelayServer {
             .get_mut(&game_id)
             .ok_or("Game not found".to_owned())
             .and_then(|game| {
-                let apu = game.replenish()?;
+                let cursed = game.curse_election.redeem();
+                let apu = game.replenish(&cursed)?;
+                game.curse_election.reset();
                 Ok((game, apu))
             })
             .and_then(|(game, apu)| {
@@ -596,6 +616,10 @@ impl Handler<Replenish> for RelayServer {
                     let turn_end_time =
                         MsgResult::turn_end_unix(&game).unwrap_or_else(|e| MsgResult::alert(&e));
                     sessions.send_user(&uid, &turn_end_time);
+                    // send curse vote status
+                    let curse_msg = MsgResult::player_action(&game.get_player_action(&uid))
+                        .unwrap_or_else(|e| MsgResult::error("curse_vote_status", &e));
+                    sessions.send_user(&uid, &curse_msg);
                 }
                 ctx.notify_later(
                     Replenish { game_id },

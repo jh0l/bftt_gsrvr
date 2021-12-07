@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use rand::Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::{Game, Player, PlayerResponse};
+use crate::game::{Game, Player, PlayerResponse, PlayersAliveDead};
 
 #[derive(Deserialize)]
 pub struct Identity {
@@ -77,7 +77,7 @@ struct GameTurnEndUnix {
 #[derive(Debug, Clone, Serialize)]
 struct PlayersAliveUpdate {
     game_id: String,
-    alive: HashSet<String>,
+    alive_dead: PlayersAliveDead,
 }
 
 pub struct MsgResult;
@@ -144,9 +144,12 @@ impl MsgResult {
         MsgResult::json_string("/player_action", action)
     }
 
-    pub fn players_alive_update(alive: &HashSet<String>, game_id: &str) -> Result<String, String> {
+    pub fn players_alive_update(
+        alive_dead: &PlayersAliveDead,
+        game_id: &str,
+    ) -> Result<String, String> {
         let res = PlayersAliveUpdate {
-            alive: alive.clone(),
+            alive_dead: alive_dead.clone(),
             game_id: game_id.to_owned(),
         };
         MsgResult::json_string("/players_alive_update", &res)
