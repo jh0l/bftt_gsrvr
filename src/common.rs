@@ -4,7 +4,7 @@ use rand::Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::{Game, Player, PlayerResponse, PlayersAliveDead};
+use crate::game::{Game, GameActionResponse, Player, PlayerActionResponse, PlayersAliveDead};
 
 #[derive(Deserialize)]
 pub struct Identity {
@@ -140,7 +140,11 @@ impl MsgResult {
         MsgResult::json_string("/user_status", user_status)
     }
 
-    pub fn player_action(action: &PlayerResponse) -> Result<String, String> {
+    pub fn game_action(action: &GameActionResponse) -> Result<String, String> {
+        MsgResult::json_string("/game_action", action)
+    }
+
+    pub fn player_action(action: &PlayerActionResponse) -> Result<String, String> {
         MsgResult::json_string("/player_action", action)
     }
 

@@ -6,10 +6,13 @@ use crate::common::MsgResult;
 use crate::common::SuccessResult;
 use crate::common::UserStatusResult;
 use crate::game::ActionType;
+use crate::game::ActionTypeEvent;
 use crate::game::Game;
+use crate::game::GameActionResponse;
+use crate::game::GameStateResult;
 use crate::game::InsertPlayerResult;
 use crate::game::Player;
-use crate::game::PlayerActionResult;
+use crate::game::PlayerActionResponse;
 use crate::game::BOARD_SIZE;
 use actix::prelude::*;
 use rand::prelude::ThreadRng;
@@ -102,6 +105,16 @@ pub struct UserStatus {
     pub user_id: String,
 }
 
+// created by the game
+#[derive(Message, Debug)]
+#[rtype(result = "()")]
+pub struct GameObjectEvent {
+    pub action: ActionTypeEvent,
+    pub game_id: String,
+    pub object: String,
+}
+
+// created by players
 #[derive(Message, Debug)]
 #[rtype(result = "()")]
 pub struct PlayerActionRequest {
@@ -114,23 +127,6 @@ pub struct PlayerActionRequest {
 #[rtype(result = "Result<(), String>")]
 pub struct Replenish {
     pub game_id: String,
-}
-
-/// `RelayServer` manages users and games
-/// relays user requests to games
-/// relays game events to users
-/// handles dead sessions and verifying new sessions
-pub struct RelayServer {
-    /// map of User IDs to corresponding user
-    users: HashMap<String, User>,
-    /// map of user IDs to the ID of game they're currently in
-    user_games: HashMap<String, String>,
-    /// map of User IDs to corresponding client session
-    sessions: RelayServerSessions,
-    /// map of Game IDs to corresponding game
-    games: HashMap<String, Game>,
-    /// random number generator
-    rng: ThreadRng,
 }
 
 struct RelayServerSessions {
@@ -188,23 +184,73 @@ impl RelayServerSessions {
         }
     }
 
-    pub fn send_player_game_data(&self, user_id: String, game: &Game) {
-        // send action points update to host
-        let game_id = game.game_id.clone();
-        let apu = ActionPointUpdate::new(&user_id, &game_id, game.players[&user_id].action_points);
+    pub fn send_player_secret_data_with_curse(&self, user_id: &str, game: &Game) {
+        let game_id = game.game_id.as_str();
+        // send action points update
+        let apu = ActionPointUpdate::new(user_id, game_id, game.players[user_id].action_points);
         let apu_msg = MsgResult::action_point_update(&apu)
-            .unwrap_or_else(|e| MsgResult::error("joined action_point_update", &e));
+            .unwrap_or_else(|e| MsgResult::error("send_player_secret_data", &e));
         self.send_user(&user_id, &apu_msg);
-        // // send alive dead update
-        // let alive_dead_set = &game.players_alive_dead;
-        // let pad_msg = MsgResult::players_alive_update(&alive_dead_set, &game.game_id)
-        //     .unwrap_or_else(|e| MsgResult::alert(&e));
-        // self.send_user(&user_id, &pad_msg);
         // send curse vote status
         let curse_msg = MsgResult::player_action(&game.get_player_action(&user_id))
-            .unwrap_or_else(|e| MsgResult::error("curse_vote_status", &e));
-        self.send_user(&user_id, &curse_msg);
+            .unwrap_or_else(|e| MsgResult::error("send_player_secret_data", &e));
+        self.send_user(user_id, &curse_msg);
     }
+
+    // send updates to players for player actions, player action points, and players alive/dead
+    pub fn send_player_effects(
+        &self,
+        par: GameStateResult,
+        pr: PlayerActionResponse,
+        game: &Game,
+        secret_action: bool,
+        req_user_id: Option<&str>,
+    ) {
+        let GameStateResult {
+            action_point_updates,
+            players_alive_dead,
+        } = par;
+        // send action point updates
+        for (uid, gid, ap) in action_point_updates {
+            let apu = ActionPointUpdate::new(&uid, &gid, ap);
+            let msg = MsgResult::action_point_update(&apu).unwrap_or_else(|e| MsgResult::alert(&e));
+            self.send_user(&uid, &msg);
+        }
+        // send alive dead list updates
+        if let Some(alive_dead_set) = players_alive_dead {
+            let msg = MsgResult::players_alive_update(&alive_dead_set, &game.game_id)
+                .unwrap_or_else(|e| MsgResult::alert(&e));
+            self.send_all(game.players.keys(), &msg);
+        }
+        // send action update
+        if !secret_action {
+            let json = MsgResult::player_action(&pr).unwrap_or_else(|e| MsgResult::alert(&e));
+            // send game updates
+            self.send_all(game.players.keys(), &json)
+        } else {
+            if let Some(user_id) = req_user_id {
+                let json = MsgResult::player_action(&pr).unwrap_or_else(|e| MsgResult::alert(&e));
+                self.send_user(user_id, &json);
+            }
+        }
+    }
+}
+
+/// `RelayServer` manages users and games
+/// relays user requests to games
+/// relays game events to users
+/// handles dead sessions and verifying new sessions
+pub struct RelayServer {
+    /// map of User IDs to corresponding user
+    users: HashMap<String, User>,
+    /// map of user IDs to the ID of game they're currently in
+    user_games: HashMap<String, String>,
+    /// map of User IDs to corresponding client session
+    sessions: RelayServerSessions,
+    /// map of Game IDs to corresponding game
+    games: HashMap<String, Game>,
+    /// random number generator
+    rng: ThreadRng,
 }
 
 /// Make actor from `RelaySever`
@@ -222,6 +268,30 @@ impl RelayServer {
             games: HashMap::new(),
             rng: rand::thread_rng(),
         }
+    }
+
+    pub fn schedule_replenish(game: &Game, ctx: &mut Context<Self>) {
+        ctx.notify_later(
+            Replenish {
+                game_id: game.game_id.clone(),
+            },
+            Duration::from_secs(game.config.turn_time_secs),
+        );
+    }
+
+    pub fn schedule_heart_spawn(game: &mut Game, ctx: &mut Context<Self>) {
+        let (time, action, object) = game.generate_heart_spawn();
+        dbg!(time);
+        dbg!(game.config.turn_time_secs);
+
+        ctx.notify_later(
+            GameObjectEvent {
+                action,
+                object,
+                game_id: game.game_id.clone(),
+            },
+            Duration::from_secs(time),
+        );
     }
 }
 
@@ -353,7 +423,7 @@ impl Handler<HostGame> for RelayServer {
                 self.sessions.send_user(&host_user_id, &msg_result);
                 // send player all secret game data
                 self.sessions
-                    .send_player_game_data(host_user_id.clone(), &game);
+                    .send_player_secret_data_with_curse(&host_user_id, &game);
                 // send alert
                 let alert = if new_game {
                     MsgResult::alert("new game created")
@@ -411,7 +481,7 @@ impl Handler<JoinGame> for RelayServer {
                 // send game json to player that joined (or rejoined)
                 sessions.send_user(&user_id, &msg);
                 // send player secret game data
-                sessions.send_player_game_data(user_id.clone(), &game);
+                sessions.send_player_secret_data_with_curse(&user_id, &game);
                 Ok(())
             });
         MessageResult(res)
@@ -477,12 +547,9 @@ impl Handler<StartGame> for RelayServer {
                     sessions.send_user(&player_id, &msg);
                 }
                 // schedule replenish
-                ctx.notify_later(
-                    Replenish {
-                        game_id: game.game_id.clone(),
-                    },
-                    Duration::from_secs(game.config.turn_time_secs),
-                );
+                RelayServer::schedule_replenish(game, ctx);
+                // generate turn's random heart spawn
+                // RelayServer::schedule_heart_spawn(game, ctx);
                 Ok(())
             });
         MessageResult(res)
@@ -548,45 +615,62 @@ impl Handler<PlayerActionRequest> for RelayServer {
                         }
                     }
                     // determine whether game update is sent to every player
-                    secret_action = match action {
-                        ActionType::Curse(_) => true,
-                        _ => false,
-                    };
+                    if let ActionType::Curse(_) = action {
+                        secret_action = true;
+                    }
                     (e, game)
                 })
-            })
-            // TODO rewind game action upon json serialization error
-            .and_then(|((res, apu), game)| {
-                MsgResult::player_action(&res).map(|json| (json, game, apu))
             });
+        // TODO rewind game action upon json serialization error
         match res {
             Err(e) => sessions.send_user(&user_id, &MsgResult::error("player_action", &e)),
-            Ok((json, game, par)) => {
-                let PlayerActionResult {
-                    action_point_updates,
-                    players_alive_dead,
-                } = par;
-                // send action point updates
-                for (uid, gid, ap) in action_point_updates {
-                    let apu = ActionPointUpdate::new(&uid, &gid, ap);
-                    let msg = MsgResult::action_point_update(&apu)
-                        .unwrap_or_else(|e| MsgResult::alert(&e));
-                    sessions.send_user(&uid, &msg);
-                }
-                // send alive dead list updates
-                if let Some(alive_dead_set) = players_alive_dead {
-                    let msg = MsgResult::players_alive_update(&alive_dead_set, &game.game_id)
-                        .unwrap_or_else(|e| MsgResult::alert(&e));
-                    sessions.send_all(game.players.keys(), &msg);
-                }
-                if !secret_action {
-                    // send game updates
-                    sessions.send_all(game.players.keys(), &json)
-                } else {
-                    sessions.send_user(&user_id, &json);
-                }
+            Ok(((pr, par), game)) => {
+                sessions.send_player_effects(par, pr, game, secret_action, Some(&user_id));
             }
         };
+    }
+}
+
+impl Handler<GameObjectEvent> for RelayServer {
+    type Result = ();
+    fn handle(&mut self, msg: GameObjectEvent, _: &mut Context<Self>) -> Self::Result {
+        let GameObjectEvent {
+            action,
+            game_id,
+            object,
+        } = msg;
+        let sessions = &self.sessions;
+        let res = self
+            .games
+            .get_mut(&game_id)
+            .ok_or("Game not found".to_owned())
+            .and_then(|game| {
+                game.game_action(&action, &object)
+                    .and_then(|(objects, player_res)| {
+                        let p_msg = MsgResult::game_action(&GameActionResponse {
+                            action,
+                            game_id,
+                            objects,
+                        })?;
+                        sessions.send_all(game.players.keys(), &p_msg);
+                        if let Some((pr, par)) = player_res {
+                            // send out player effects
+                            sessions.send_player_effects(par, pr, game, false, None);
+                        }
+                        Ok(())
+                    })
+                    .or_else(|e| {
+                        sessions.send_user(
+                            &game.host_user_id.clone().unwrap(),
+                            &MsgResult::error("game action", &e),
+                        );
+                        Ok(())
+                    })
+            });
+        if let Err(e) = res {
+            // TODO logging!
+            dbg!(e);
+        }
     }
 }
 
@@ -600,12 +684,15 @@ impl Handler<Replenish> for RelayServer {
             .get_mut(&game_id)
             .ok_or("Game not found".to_owned())
             .and_then(|game| {
-                let cursed = game.curse_election.redeem();
-                let apu = game.replenish(&cursed)?;
-                game.curse_election.reset();
+                let apu = game.replenish()?;
                 Ok((game, apu))
             })
             .and_then(|(game, apu)| {
+                // schedule replenish
+                RelayServer::schedule_replenish(game, ctx);
+                // generate turn's random heart spawn
+                // RelayServer::schedule_heart_spawn(game, ctx);
+                // update clientside data
                 for (uid, gid, ap) in apu {
                     // send action point updates to player
                     let apu = ActionPointUpdate::new(&uid, &gid, ap);
@@ -621,10 +708,7 @@ impl Handler<Replenish> for RelayServer {
                         .unwrap_or_else(|e| MsgResult::error("curse_vote_status", &e));
                     sessions.send_user(&uid, &curse_msg);
                 }
-                ctx.notify_later(
-                    Replenish { game_id },
-                    Duration::from_secs(game.config.turn_time_secs),
-                );
+
                 Ok(())
             });
         if res.is_err() {

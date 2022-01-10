@@ -93,13 +93,13 @@ impl Player {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Board {
-    map: HashMap<String, String>,
+pub struct Board<T> {
+    map: HashMap<String, T>,
     size: usize,
 }
 
-impl Board {
-    pub fn new(size: usize) -> Board {
+impl<T> Board<T> {
+    pub fn new(size: usize) -> Board<T> {
         Board {
             map: HashMap::new(),
             size,
@@ -241,8 +241,8 @@ impl Election {
             .and_then(|f| Some(f.to_owned()))
     }
 
-    /// get winning candidates
-    pub fn redeem(&self) -> HashSet<String> {
+    /// get highest voted candidates
+    pub fn redeem(&mut self) -> HashSet<String> {
         // candidates must have at least 1 vote, candidates with empty hashsets are ignored
         let mut len = 1;
         let mut res: HashSet<String> = HashSet::new();
@@ -255,6 +255,7 @@ impl Election {
                 len = v.len();
             }
         }
+        self.reset();
         res
     }
 
@@ -289,7 +290,8 @@ pub struct Game {
     pub host_user_id: Option<String>,
     pub players: HashMap<String, Player>,
     pub players_alive_dead: PlayersAliveDead,
-    pub board: Board,
+    pub board: Board<String>,
+    pub object_board: Board<HashMap<String, usize>>,
     pub turn_end_unix: u64,
     pub config: GameConfig,
     #[serde(skip_serializing)]
@@ -314,7 +316,7 @@ pub struct GiveAction {
 }
 #[derive(Deserialize, Debug)]
 pub struct MoveAction {
-    pos: Pos,
+    pub pos: Pos,
 }
 #[derive(Deserialize, Serialize, Debug)]
 pub struct RangeUpgradeAction {
@@ -327,7 +329,6 @@ pub struct HealAction {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ReviveAction {
     target_user_id: String,
-    point_cost: u32,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -355,8 +356,8 @@ pub struct PlayerAction {
 
 #[derive(Serialize, Debug)]
 pub struct MoveEvent {
-    from: Pos,
-    to: Pos,
+    pub from: Pos,
+    pub to: Pos,
 }
 #[derive(Serialize, Debug)]
 pub enum ActionTypeEvent {
@@ -370,20 +371,27 @@ pub enum ActionTypeEvent {
 }
 
 #[derive(Serialize, Debug)]
-pub struct PlayerResponse {
+pub struct PlayerActionResponse {
     user_id: String,
     game_id: String,
     action: ActionTypeEvent,
     phase: GamePhase,
 }
 
+#[derive(Serialize, Debug)]
+pub struct GameActionResponse {
+    pub game_id: String,
+    pub action: ActionTypeEvent,
+    pub objects: HashMap<String, HashMap<String, usize>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
-pub struct PlayerActionResult {
+pub struct GameStateResult {
     pub action_point_updates: Vec<(String, String, u32)>,
     pub players_alive_dead: Option<PlayersAliveDead>,
 }
 
-pub const TURN_TIME_SECS: u64 = 10;
+pub const TURN_TIME_SECS: u64 = 2;
 pub const MAX_PLAYERS: u16 = 13;
 pub const BOARD_SIZE: u16 = 10;
 pub const INIT_RANGE: usize = 2;
@@ -419,6 +427,7 @@ impl Game {
             players: HashMap::new(),
             players_alive_dead: PlayersAliveDead::new(),
             board: Board::new(size as usize),
+            object_board: Board::new(size as usize),
             turn_end_unix: 0,
             config: GameConfig::new(),
             rnd,
@@ -447,7 +456,12 @@ impl Game {
             player.range = self.config.init_range;
             if matches!(self.config.init_pos, InitPosConfig::Random) {
                 // randomly position player
-                Game::randomly_position(&mut player, &self.die(), &mut self.rnd, &mut self.board);
+                Game::randomly_position(
+                    &mut player,
+                    &self.coord_die(),
+                    &mut self.rnd,
+                    &mut self.board,
+                );
             }
             // insert player
             self.players.insert(user_id.clone(), player);
@@ -462,7 +476,7 @@ impl Game {
         player: &mut Player,
         die: &Uniform<usize>,
         rnd: &mut ThreadRng,
-        board: &mut Board,
+        board: &mut Board<String>,
     ) {
         // remove player from current position
         board.map.remove(&player.pos.key());
@@ -479,7 +493,7 @@ impl Game {
         }
     }
 
-    pub fn die(&self) -> Uniform<usize> {
+    pub fn coord_die(&self) -> Uniform<usize> {
         Uniform::from(0..self.board.size)
     }
 
@@ -543,7 +557,7 @@ impl Game {
                 self.config.init_pos = v.clone();
                 if let InitPosConfig::Random = v {
                     let mut res: HashMap<String, String> = HashMap::new();
-                    let die = self.die();
+                    let die = self.coord_die();
                     for player in self.players.values_mut() {
                         let pos = player.pos.clone();
                         Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
@@ -560,6 +574,28 @@ impl Game {
         Ok(None)
     }
 
+    pub fn generate_heart_spawn(&mut self) -> (u64, ActionTypeEvent, String) {
+        // get turn end time
+        // generate duration between now and then
+        // generate random move to position on board
+        // return random time and position
+        let end = self.config.turn_time_secs;
+        let time_die = Uniform::from(0..end);
+        let time = time_die.sample(&mut self.rnd);
+        let die = self.coord_die();
+        let x = die.sample(&mut self.rnd);
+        let y = die.sample(&mut self.rnd);
+        let pos = Pos { x, y };
+        let action = ActionTypeEvent::Move(MoveEvent {
+            from: Pos {
+                x: usize::MAX,
+                y: usize::MAX,
+            },
+            to: pos,
+        });
+        (time, action, "heart".to_string())
+    }
+
     pub fn start_game(&mut self) -> Result<(), String> {
         if !matches!(self.phase, GamePhase::Init) {
             return Err("game already started".to_owned());
@@ -567,7 +603,7 @@ impl Game {
         if self.players.len() < 4 {
             return Err("4 or more players required to start a game".to_owned());
         }
-        let die = self.die();
+        let die = self.coord_die();
         for player in self.players.values_mut() {
             if player.pos.x >= self.board.size || player.pos.y >= self.board.size {
                 Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
@@ -592,12 +628,10 @@ impl Game {
         Ok(())
     }
 
-    /// redeem curse election results, replenish living players
-    pub fn replenish(
-        &mut self,
-        cursed: &HashSet<String>,
-    ) -> Result<Vec<(String, String, u32)>, String> {
+    /// redeem curse election results, replenish non-cursed living players
+    pub fn replenish(&mut self) -> Result<Vec<(String, String, u32)>, String> {
         self.check_in_prog()?;
+        let cursed = self.curse_election.redeem();
         let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
         for player in self.players.values_mut() {
             if !cursed.contains(&player.user_id) {
@@ -611,6 +645,7 @@ impl Game {
                 player.action_points,
             ));
         }
+        self.curse_election.reset();
         self.turn_end_unix = from_now(self.config.turn_time_secs);
         Ok(action_point_updates)
     }
@@ -640,6 +675,122 @@ impl Game {
         Ok(())
     }
 
+    pub fn game_action(
+        &mut self,
+        action: &ActionTypeEvent,
+        obj: &str,
+    ) -> Result<
+        (
+            HashMap<String, HashMap<String, usize>>,
+            Option<(PlayerActionResponse, GameStateResult)>,
+        ),
+        String,
+    > {
+        let mut player_effects: Option<(PlayerActionResponse, GameStateResult)> = None;
+        match &action {
+            ActionTypeEvent::Move(m) => {
+                // <VALIDATE>
+                // move must be in bounds
+                self.object_board.in_bounds(&m.to, false)?;
+                // <EXECUTE>
+                // remove from old position (out of bounds m.from positions are ignored)
+                self.object_board.map.get_mut(&m.from.key()).and_then(|v| {
+                    v.get_mut(obj).and_then(|f| {
+                        // counter for object type is pre-existing
+                        *f -= 1;
+                        Some(())
+                    });
+                    Some(())
+                });
+                // check if space occupied by player already
+                if let Some(player) = self.board.map.get(&m.to.key()) {
+                    // player is present on the tile targeted by object move
+                    // apply object directly to player, skip modifying board
+                    let player = self
+                        .players
+                        .get_mut(player)
+                        .ok_or("player occupying space not found".to_owned())?;
+
+                    // update player, action point updates
+                    player_effects = match obj {
+                        "heart" => {
+                            // is the player alive or dead?
+                            let (action, players_alive_dead) = if player.lives < 1 {
+                                // player dead
+                                // set player as alive
+                                self.players_alive_dead.set_alive(&player.user_id);
+                                (
+                                    ActionTypeEvent::Revive(ReviveAction {
+                                        target_user_id: player.user_id.to_owned(),
+                                    }),
+                                    Some(self.players_alive_dead.clone()),
+                                )
+                            } else {
+                                // player alive
+                                // player life updated only
+                                (
+                                    ActionTypeEvent::Heal(HealAction {
+                                        point_cost: HEAL_COST,
+                                    }),
+                                    None,
+                                )
+                            };
+                            let par = PlayerActionResponse {
+                                game_id: self.game_id.clone(),
+                                user_id: player.user_id.clone(),
+                                phase: self.phase.clone(),
+                                action,
+                            };
+                            let gsr = GameStateResult {
+                                action_point_updates: Vec::new(),
+                                players_alive_dead,
+                            };
+                            Ok(Some((par, gsr)))
+                        }
+                        _ => Err(format!("unknown object {}", obj).to_owned()),
+                    }?;
+                    // update player lives
+                } else {
+                    // add object to position
+                    // NOTE: emptied hashmaps and objects should be kept for updating existing objects on the client
+                    self.object_board
+                        .map
+                        .get_mut(&m.to.key())
+                        .and_then(|v| {
+                            // hashmap for position already exists
+                            v.get_mut(obj)
+                                .and_then(|o| {
+                                    // counter for object type already exists
+                                    if *o > 0 {
+                                        *o += 1;
+                                    }
+                                    Some(())
+                                })
+                                .or_else(|| {
+                                    // counter for object type does not exist
+                                    v.insert(obj.to_owned(), 1);
+                                    Some(())
+                                });
+                            Some(())
+                        })
+                        .or_else(|| {
+                            // hashmap for position does not exist
+                            let mut v = HashMap::new();
+                            // counter for object type does not exist
+                            v.insert(obj.to_owned(), 1);
+                            // hashmap with object counter now exists
+                            self.object_board.map.insert(m.to.key(), v);
+                            Some(())
+                        });
+                }
+            }
+            _ => {
+                return Err("action type event not implemented!".to_owned());
+            }
+        }
+        Ok((self.object_board.map.clone(), player_effects))
+    }
+
     /// validate a player action then execute the required changes to the game
     /// `player_flux` is a copy of the acting player to be applied at fn end
     /// `target_flux` is a copy of the target player to be applied at match arm end
@@ -648,7 +799,7 @@ impl Game {
         &mut self,
         user_id: &str,
         action: &ActionType,
-    ) -> Result<(PlayerResponse, PlayerActionResult), String> {
+    ) -> Result<(PlayerActionResponse, GameStateResult), String> {
         if matches!(self.phase, GamePhase::End) {
             return Err("game over".to_string());
         }
@@ -830,10 +981,7 @@ impl Game {
             ActionType::Revive(rev) => {
                 // <VALIDATE>
                 // game must be in progress
-                let ReviveAction {
-                    point_cost,
-                    target_user_id,
-                } = rev;
+                let ReviveAction { target_user_id } = rev;
                 self.check_in_prog()?;
                 if user_id == target_user_id {
                     return Err("you can't revive yourself".to_string());
@@ -859,7 +1007,6 @@ impl Game {
                 ActionTypeEvent::Revive({
                     ReviveAction {
                         target_user_id: target_user_id.to_string(),
-                        point_cost: point_cost.clone(),
                     }
                 })
             }
@@ -896,22 +1043,22 @@ impl Game {
         self.players
             .insert(player_flux.user_id.clone(), player_flux);
         Ok((
-            PlayerResponse {
+            PlayerActionResponse {
                 game_id: self.game_id.clone(),
                 user_id: user_id.to_string(),
                 phase: self.phase.clone(),
                 action,
             },
-            PlayerActionResult {
+            GameStateResult {
                 action_point_updates,
                 players_alive_dead,
             },
         ))
     }
 
-    pub fn get_player_action(&self, player_id: &str) -> PlayerResponse {
+    pub fn get_player_action(&self, player_id: &str) -> PlayerActionResponse {
         // TODO match arm for all types of ActionTypeEvent
-        PlayerResponse {
+        PlayerActionResponse {
             action: ActionTypeEvent::Curse(CurseAction {
                 target_user_id: self.curse_election.get_voter_vote(player_id),
             }),
@@ -922,11 +1069,15 @@ impl Game {
     }
 }
 
-fn from_now(to_secs: u64) -> u64 {
+fn now() -> u64 {
     let start = SystemTime::now();
-    let since_the_epoch = start
+    start
         .duration_since(UNIX_EPOCH)
         .expect("Time went backwards")
-        .as_secs();
+        .as_secs()
+}
+
+fn from_now(to_secs: u64) -> u64 {
+    let since_the_epoch = now();
     since_the_epoch + to_secs
 }
