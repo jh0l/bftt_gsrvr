@@ -4,7 +4,7 @@ use rand::Rng;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::{Game, Player, PlayerResponse, PlayersAliveDead};
+use crate::game::{Game, Player, PlayerResponse, PlayersAliveDead, Pos};
 
 #[derive(Deserialize)]
 pub struct Identity {
@@ -80,6 +80,14 @@ struct PlayersAliveUpdate {
     alive_dead: PlayersAliveDead,
 }
 
+#[derive(Debug, Serialize)]
+struct BoardActionPoints {
+    game_id: String,
+    board: HashMap<String, u32>,
+    new: Option<Pos>,
+    old: Option<Pos>,
+}
+
 pub struct MsgResult;
 
 impl MsgResult {
@@ -122,6 +130,20 @@ impl MsgResult {
 
     pub fn start_game(game: &Game) -> Result<String, String> {
         MsgResult::json_string("/start_game", game)
+    }
+
+    pub fn board_action_points(
+        game: &Game,
+        new: Option<Pos>,
+        old: Option<Pos>,
+    ) -> Result<String, String> {
+        let bap = BoardActionPoints {
+            board: game.ap_board.map.clone(),
+            game_id: game.game_id.to_owned(),
+            new,
+            old,
+        };
+        MsgResult::json_string("/board_action_points", &bap)
     }
 
     pub fn action_point_update(apu: &ActionPointUpdate) -> Result<String, String> {

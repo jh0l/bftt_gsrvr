@@ -111,6 +111,12 @@ pub struct PlayerActionRequest {
 }
 
 #[derive(Message, Clone, Debug)]
+#[rtype(result = "()")]
+pub struct ActionPointSpawn {
+    pub game_id: String,
+}
+
+#[derive(Message, Clone, Debug)]
 #[rtype(result = "Result<(), String>")]
 pub struct Replenish {
     pub game_id: String,
@@ -483,6 +489,13 @@ impl Handler<StartGame> for RelayServer {
                     },
                     Duration::from_secs(game.config.turn_time_secs),
                 );
+                // schedule action point spawn
+                ctx.notify_later(
+                    ActionPointSpawn {
+                        game_id: game.game_id.clone(),
+                    },
+                    Duration::from_millis(game.new_item_spawn_time_ms()),
+                );
                 Ok(())
             });
         MessageResult(res)
@@ -590,6 +603,27 @@ impl Handler<PlayerActionRequest> for RelayServer {
     }
 }
 
+impl Handler<ActionPointSpawn> for RelayServer {
+    type Result = ();
+    fn handle(&mut self, msg: ActionPointSpawn, _: &mut Context<Self>) -> Self::Result {
+        let ActionPointSpawn { game_id } = msg;
+        let sessions = &self.sessions;
+        let res = self
+            .games
+            .get_mut(&game_id)
+            .ok_or("Game not found".to_owned())
+            .and_then(|game| {
+                let new = game.spawn_action_point();
+                let msg = MsgResult::board_action_points(game, Some(new), None)?;
+                sessions.send_all(game.players.keys(), &msg);
+                Ok(())
+            });
+        if res.is_err() {
+            dbg!(&res);
+        }
+    }
+}
+
 impl Handler<Replenish> for RelayServer {
     type Result = MessageResult<Replenish>;
     fn handle(&mut self, msg: Replenish, ctx: &mut Context<Self>) -> Self::Result {
@@ -624,6 +658,13 @@ impl Handler<Replenish> for RelayServer {
                 ctx.notify_later(
                     Replenish { game_id },
                     Duration::from_secs(game.config.turn_time_secs),
+                );
+                // schedule action point spawn
+                ctx.notify_later(
+                    ActionPointSpawn {
+                        game_id: game.game_id.clone(),
+                    },
+                    Duration::from_millis(game.new_item_spawn_time_ms()),
                 );
                 Ok(())
             });

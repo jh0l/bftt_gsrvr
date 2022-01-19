@@ -93,13 +93,13 @@ impl Player {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct Board {
-    map: HashMap<String, String>,
+pub struct Board<T> {
+    pub map: HashMap<String, T>,
     size: usize,
 }
 
-impl Board {
-    pub fn new(size: usize) -> Board {
+impl<T> Board<T> {
+    pub fn new(size: usize) -> Board<T> {
         Board {
             map: HashMap::new(),
             size,
@@ -289,7 +289,8 @@ pub struct Game {
     pub host_user_id: Option<String>,
     pub players: HashMap<String, Player>,
     pub players_alive_dead: PlayersAliveDead,
-    pub board: Board,
+    pub board: Board<String>,
+    pub ap_board: Board<u32>,
     pub turn_end_unix: u64,
     pub config: GameConfig,
     #[serde(skip_serializing)]
@@ -419,6 +420,7 @@ impl Game {
             players: HashMap::new(),
             players_alive_dead: PlayersAliveDead::new(),
             board: Board::new(size as usize),
+            ap_board: Board::new(size as usize),
             turn_end_unix: 0,
             config: GameConfig::new(),
             rnd,
@@ -447,7 +449,12 @@ impl Game {
             player.range = self.config.init_range;
             if matches!(self.config.init_pos, InitPosConfig::Random) {
                 // randomly position player
-                Game::randomly_position(&mut player, &self.die(), &mut self.rnd, &mut self.board);
+                Game::randomly_position(
+                    &mut player,
+                    &self.board_die(),
+                    &mut self.rnd,
+                    &mut self.board,
+                );
             }
             // insert player
             self.players.insert(user_id.clone(), player);
@@ -462,7 +469,7 @@ impl Game {
         player: &mut Player,
         die: &Uniform<usize>,
         rnd: &mut ThreadRng,
-        board: &mut Board,
+        board: &mut Board<String>,
     ) {
         // remove player from current position
         board.map.remove(&player.pos.key());
@@ -479,7 +486,7 @@ impl Game {
         }
     }
 
-    pub fn die(&self) -> Uniform<usize> {
+    pub fn board_die(&self) -> Uniform<usize> {
         Uniform::from(0..self.board.size)
     }
 
@@ -543,7 +550,7 @@ impl Game {
                 self.config.init_pos = v.clone();
                 if let InitPosConfig::Random = v {
                     let mut res: HashMap<String, String> = HashMap::new();
-                    let die = self.die();
+                    let die = self.board_die();
                     for player in self.players.values_mut() {
                         let pos = player.pos.clone();
                         Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
@@ -567,7 +574,7 @@ impl Game {
         if self.players.len() < 4 {
             return Err("4 or more players required to start a game".to_owned());
         }
-        let die = self.die();
+        let die = self.board_die();
         for player in self.players.values_mut() {
             if player.pos.x >= self.board.size || player.pos.y >= self.board.size {
                 Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
@@ -590,6 +597,32 @@ impl Game {
             return Err("Game not in progress".to_owned());
         }
         Ok(())
+    }
+
+    /// generate new item spawn time in milliseconds based on turn_time_secs
+    pub fn new_item_spawn_time_ms(&mut self) -> u64 {
+        let bound = self.config.turn_time_secs * 1000;
+        let die = Uniform::from(0..bound);
+        die.sample(&mut self.rnd)
+    }
+
+    /// insert an action point in ap_board
+    pub fn spawn_action_point(&mut self) -> Pos {
+        // random positin
+        let die = self.board_die();
+        let x = die.sample(&mut self.rnd);
+        let y = die.sample(&mut self.rnd);
+        let pos = Pos { x, y };
+
+        // try adding to existing position
+        if let None = self.ap_board.map.get_mut(&pos.key()).and_then(|t| {
+            *t += 1;
+            Some(t)
+        }) {
+            // if position is non existant, insert new position
+            self.ap_board.map.insert(pos.key(), 1);
+        }
+        Pos { x: 1, y: 1 }
     }
 
     /// redeem curse election results, replenish living players
