@@ -10,6 +10,7 @@ use crate::game::Game;
 use crate::game::InsertPlayerResult;
 use crate::game::Player;
 use crate::game::PlayerActionResult;
+use crate::game::Pos;
 use crate::game::BOARD_SIZE;
 use actix::prelude::*;
 use rand::prelude::ThreadRng;
@@ -112,7 +113,7 @@ pub struct PlayerActionRequest {
 
 #[derive(Message, Clone, Debug)]
 #[rtype(result = "()")]
-pub struct ActionPointSpawn {
+pub struct SpawnTileHeart {
     pub game_id: String,
 }
 
@@ -491,7 +492,7 @@ impl Handler<StartGame> for RelayServer {
                 );
                 // schedule action point spawn
                 ctx.notify_later(
-                    ActionPointSpawn {
+                    SpawnTileHeart {
                         game_id: game.game_id.clone(),
                     },
                     Duration::from_millis(game.new_item_spawn_time_ms()),
@@ -569,8 +570,8 @@ impl Handler<PlayerActionRequest> for RelayServer {
                 })
             })
             // TODO rewind game action upon json serialization error
-            .and_then(|((res, apu), game)| {
-                MsgResult::player_action(&res).map(|json| (json, game, apu))
+            .and_then(|((res, par), game)| {
+                MsgResult::player_action(&res).map(|json| (json, game, par))
             });
         match res {
             Err(e) => sessions.send_user(&user_id, &MsgResult::error("player_action", &e)),
@@ -603,18 +604,18 @@ impl Handler<PlayerActionRequest> for RelayServer {
     }
 }
 
-impl Handler<ActionPointSpawn> for RelayServer {
+impl Handler<SpawnTileHeart> for RelayServer {
     type Result = ();
-    fn handle(&mut self, msg: ActionPointSpawn, _: &mut Context<Self>) -> Self::Result {
-        let ActionPointSpawn { game_id } = msg;
+    fn handle(&mut self, msg: SpawnTileHeart, _: &mut Context<Self>) -> Self::Result {
+        let SpawnTileHeart { game_id } = msg;
         let sessions = &self.sessions;
         let res = self
             .games
             .get_mut(&game_id)
             .ok_or("Game not found".to_owned())
             .and_then(|game| {
-                let new = game.spawn_action_point();
-                let msg = MsgResult::board_action_points(game, Some(new), None)?;
+                let set: (Pos, u32) = game.spawn_tile_heart();
+                let msg = MsgResult::tile_hearts(&game.game_id, set)?;
                 sessions.send_all(game.players.keys(), &msg);
                 Ok(())
             });
@@ -661,7 +662,7 @@ impl Handler<Replenish> for RelayServer {
                 );
                 // schedule action point spawn
                 ctx.notify_later(
-                    ActionPointSpawn {
+                    SpawnTileHeart {
                         game_id: game.game_id.clone(),
                     },
                     Duration::from_millis(game.new_item_spawn_time_ms()),

@@ -290,7 +290,7 @@ pub struct Game {
     pub players: HashMap<String, Player>,
     pub players_alive_dead: PlayersAliveDead,
     pub board: Board<String>,
-    pub ap_board: Board<u32>,
+    pub board_hearts: Board<u32>,
     pub turn_end_unix: u64,
     pub config: GameConfig,
     #[serde(skip_serializing)]
@@ -328,12 +328,22 @@ pub struct HealAction {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct ReviveAction {
     target_user_id: String,
-    point_cost: u32,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct CurseAction {
     target_user_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct RedeemTileHearts {
+    pos: Pos,
+    new_lives: u32,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum RedeemAction {
+    TileHearts(RedeemTileHearts),
 }
 
 #[derive(Deserialize, Debug)]
@@ -345,6 +355,7 @@ pub enum ActionType {
     Heal(HealAction),
     Revive(ReviveAction),
     Curse(CurseAction),
+    Redeem(RedeemAction),
 }
 
 #[derive(Deserialize, Debug)]
@@ -368,6 +379,7 @@ pub enum ActionTypeEvent {
     Heal(HealAction),
     Revive(ReviveAction),
     Curse(CurseAction),
+    Redeem(RedeemAction),
 }
 
 #[derive(Serialize, Debug)]
@@ -420,7 +432,7 @@ impl Game {
             players: HashMap::new(),
             players_alive_dead: PlayersAliveDead::new(),
             board: Board::new(size as usize),
-            ap_board: Board::new(size as usize),
+            board_hearts: Board::new(size as usize),
             turn_end_unix: 0,
             config: GameConfig::new(),
             rnd,
@@ -607,22 +619,28 @@ impl Game {
     }
 
     /// insert an action point in ap_board
-    pub fn spawn_action_point(&mut self) -> Pos {
+    pub fn spawn_tile_heart(&mut self) -> (Pos, u32) {
         // random positin
         let die = self.board_die();
         let x = die.sample(&mut self.rnd);
         let y = die.sample(&mut self.rnd);
         let pos = Pos { x, y };
-
         // try adding to existing position
-        if let None = self.ap_board.map.get_mut(&pos.key()).and_then(|t| {
-            *t += 1;
-            Some(t)
-        }) {
-            // if position is non existant, insert new position
-            self.ap_board.map.insert(pos.key(), 1);
-        }
-        Pos { x: 1, y: 1 }
+        let v = self
+            .board_hearts
+            .map
+            .get_mut(&pos.key())
+            .and_then(|t| {
+                *t += 1;
+                Some(t.clone())
+            })
+            .or_else(|| {
+                // if position is non existant, insert new position
+                self.board_hearts.map.insert(pos.key(), 1);
+                Some(1)
+            })
+            .unwrap();
+        (Pos { x, y }, v)
     }
 
     /// redeem curse election results, replenish living players
@@ -863,10 +881,7 @@ impl Game {
             ActionType::Revive(rev) => {
                 // <VALIDATE>
                 // game must be in progress
-                let ReviveAction {
-                    point_cost,
-                    target_user_id,
-                } = rev;
+                let ReviveAction { target_user_id } = rev;
                 self.check_in_prog()?;
                 if user_id == target_user_id {
                     return Err("you can't revive yourself".to_string());
@@ -886,13 +901,15 @@ impl Game {
                     self.players_alive_dead.set_dead(&player_flux.user_id);
                     self.curse_election.convert_candidate(&player_flux.user_id);
                 }
+                // queue player_alive_dead update
                 players_alive_dead = Some(self.players_alive_dead.clone());
+                // apply target_flux change
                 self.players
                     .insert(target_flux.user_id.clone(), target_flux);
+                // return action event
                 ActionTypeEvent::Revive({
                     ReviveAction {
                         target_user_id: target_user_id.to_string(),
-                        point_cost: point_cost.clone(),
                     }
                 })
             }
@@ -916,6 +933,44 @@ impl Game {
                         target_user_id: None,
                     })
                 };
+                // return action event
+                res
+            }
+            ActionType::Redeem(redeem) => {
+                // <VALIDATE>
+                self.check_in_prog()?;
+
+                // dead players can redeem things
+                // <EXECUTE>
+                let res = match redeem {
+                    RedeemAction::TileHearts(tile_hearts) => {
+                        let RedeemTileHearts { pos, new_lives: _ } = tile_hearts;
+                        // check player in position
+                        if pos != &player_flux.pos {
+                            return Err("player not in position".to_owned());
+                        }
+                        // check position has hearts
+                        let board_lives = self
+                            .board_hearts
+                            .map
+                            .get_mut(&pos.key())
+                            .ok_or("position heartless".to_owned())?;
+                        // add hearts to player
+                        player_flux.lives += *board_lives;
+                        *board_lives = 0;
+                        if player_flux.lives == 1 {
+                            // execute revive
+                            self.players_alive_dead.set_alive(&player_flux.user_id);
+                            self.curse_election.convert_voter(&player_flux.user_id)?;
+                            players_alive_dead = Some(self.players_alive_dead.clone());
+                        }
+                        ActionTypeEvent::Redeem(RedeemAction::TileHearts(RedeemTileHearts {
+                            new_lives: player_flux.lives,
+                            pos: pos.clone(),
+                        }))
+                    }
+                };
+                // return action event
                 res
             }
         };

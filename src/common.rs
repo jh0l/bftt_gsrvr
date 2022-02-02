@@ -81,11 +81,9 @@ struct PlayersAliveUpdate {
 }
 
 #[derive(Debug, Serialize)]
-struct BoardActionPoints {
+struct TileHearts {
     game_id: String,
-    board: HashMap<String, u32>,
-    new: Option<Pos>,
-    old: Option<Pos>,
+    set: (Pos, u32),
 }
 
 pub struct MsgResult;
@@ -132,18 +130,14 @@ impl MsgResult {
         MsgResult::json_string("/start_game", game)
     }
 
-    pub fn board_action_points(
-        game: &Game,
-        new: Option<Pos>,
-        old: Option<Pos>,
-    ) -> Result<String, String> {
-        let bap = BoardActionPoints {
-            board: game.ap_board.map.clone(),
-            game_id: game.game_id.to_owned(),
-            new,
-            old,
-        };
-        MsgResult::json_string("/board_action_points", &bap)
+    pub fn tile_hearts(game_id: &str, set: (Pos, u32)) -> Result<String, String> {
+        MsgResult::json_string(
+            "/tile_hearts_update",
+            &TileHearts {
+                game_id: game_id.to_owned(),
+                set,
+            },
+        )
     }
 
     pub fn action_point_update(apu: &ActionPointUpdate) -> Result<String, String> {
