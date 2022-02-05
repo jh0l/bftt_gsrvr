@@ -38,8 +38,8 @@ pub struct ActionPointUpdate {
 impl ActionPointUpdate {
     pub fn new(user_id: &str, game_id: &str, action_points: u32) -> ActionPointUpdate {
         ActionPointUpdate {
-            user_id: user_id.to_string(),
-            game_id: game_id.to_string(),
+            user_id: user_id.into(),
+            game_id: game_id.into(),
             action_points,
         }
     }
@@ -103,7 +103,7 @@ impl MsgResult {
     }
 
     pub fn logout(msg: &str) -> String {
-        format!("/logout {}", msg).to_string()
+        format!("/logout {}", msg).into()
     }
 
     pub fn host_game(game: &Game) -> Result<String, String> {
@@ -172,11 +172,11 @@ impl MsgResult {
     }
 
     pub fn error(context: &str, msg: &str) -> String {
-        format!("/error {}: {}", context, msg).to_string()
+        format!("/error {}: {}", context, msg).into()
     }
 
     pub fn alert(msg: &str) -> String {
-        format!("/alert {}", msg).to_string()
+        format!("/alert {}", msg).into()
     }
 }
 

@@ -74,7 +74,7 @@ impl Player {
 
     pub fn has_action_points(&self, required: u32) -> Result<(), String> {
         if self.action_points < required {
-            return Err("insufficient action points".to_string());
+            return Err("insufficient action points".into());
         }
         Ok(())
     }
@@ -86,7 +86,7 @@ impl Player {
         self.has_action_points(1)?;
         let dist = Pos::xy_distances(&self.pos, pos);
         if dist.x > self.range || dist.y > self.range {
-            return Err("move out of range".to_string());
+            return Err("move out of range".into());
         }
         Ok(())
     }
@@ -109,10 +109,10 @@ impl<T> Board<T> {
     pub fn in_bounds(&mut self, pos: &Pos, check_occupied: bool) -> Result<(), String> {
         let Pos { x, y } = pos;
         if x >= &self.size || y >= &self.size {
-            return Err("out of range".to_string());
+            return Err("out of range".into());
         }
         if check_occupied && self.map.get(&pos.key()).is_some() {
-            return Err("space is occupied".to_string());
+            return Err("space is occupied".into());
         }
         Ok(())
     }
@@ -138,7 +138,7 @@ impl PlayersAliveDead {
     }
 
     pub fn set_dead(&mut self, id: &str) {
-        self.dead.insert(id.to_string());
+        self.dead.insert(id.into());
         self.alive.remove(id);
     }
 
@@ -452,7 +452,7 @@ impl Game {
         if matches!(self.phase, GamePhase::Init) {
             // fail if game is full
             if self.players.len() == usize::from(self.config.max_players) {
-                return Err("game is at max capacity".to_string());
+                return Err("game is at max capacity".into());
             }
             let mut player = Player::new(user_id.clone(), self.game_id.clone());
             // set loadout
@@ -507,15 +507,15 @@ impl Game {
         conf: &ConfigGameOp,
     ) -> Result<Option<HashMap<String, String>>, String> {
         if !matches!(self.phase, GamePhase::Init) {
-            return Err("configuration must be during initialisation".to_string());
+            return Err("configuration must be during initialisation".into());
         }
         match conf.clone() {
             ConfigGameOp::TurnTimeSecs(v) => {
                 if v < 10 {
-                    return Err("minimum of 10 seconds is required".to_string());
+                    return Err("minimum of 10 seconds is required".into());
                 }
                 if v > 60 * 60 * 24 {
-                    return Err("maximum of 24 hours is required".to_string());
+                    return Err("maximum of 24 hours is required".into());
                 }
                 self.config.turn_time_secs = v;
             }
@@ -527,7 +527,7 @@ impl Game {
                     ));
                 }
                 if self.players.len() > v.into() {
-                    return Err("Cannot set max players below current player count".to_string());
+                    return Err("Cannot set max players below current player count".into());
                 }
                 self.config.max_players = v;
             }
@@ -701,7 +701,7 @@ impl Game {
         action: &ActionType,
     ) -> Result<(PlayerResponse, PlayerActionResult), String> {
         if matches!(self.phase, GamePhase::End) {
-            return Err("game over".to_string());
+            return Err("game over".into());
         }
         let mut action_point_updates: Vec<(String, String, u32)> = Vec::new();
         let mut players_alive_dead = None;
@@ -723,7 +723,7 @@ impl Game {
                     player_flux.action_points -= MOVE_COST;
                 } else if matches!(self.phase, GamePhase::Init) {
                     if !matches!(self.config.init_pos, InitPosConfig::Manual) {
-                        return Err("manual initial positioning must be enabled".to_string());
+                        return Err("manual initial positioning must be enabled".into());
                     }
                 }
                 // <EXECUTE>
@@ -744,7 +744,7 @@ impl Game {
                 // place user_id in new pos
                 self.board
                     .map
-                    .insert(player_flux.pos.key().clone(), user_id.to_string());
+                    .insert(player_flux.pos.key().clone(), user_id.into());
                 action_event
             }
             ActionType::Attack(attack) => {
@@ -752,7 +752,7 @@ impl Game {
                 self.check_in_prog()?;
                 // validate player is not targeting themselves
                 if user_id == attack.target_user_id {
-                    return Err("Stop hurting yourself".to_string());
+                    return Err("Stop hurting yourself".into());
                 }
                 // validate player has lives
                 player_flux.is_alive()?;
@@ -765,7 +765,7 @@ impl Game {
                 player_flux.moveable_in_prog(&target_flux.pos)?;
                 // action's lives effect is -1
                 if attack.lives_effect != ATTACK_LIVES_EFFECT {
-                    return Err("attacking must take 1 life :'(".to_string());
+                    return Err("attacking must take 1 life :'(".into());
                 }
                 // remove player action point
                 player_flux.action_points -= ATTACK_COST;
@@ -806,7 +806,7 @@ impl Game {
                 self.check_in_prog()?;
                 // player is not targeting themselves
                 if user_id == give.target_user_id {
-                    return Err("this is a futile endeavour".to_string());
+                    return Err("this is a futile endeavour".into());
                 }
                 // player has lives
                 player_flux.is_alive()?;
@@ -884,7 +884,7 @@ impl Game {
                 let ReviveAction { target_user_id } = rev;
                 self.check_in_prog()?;
                 if user_id == target_user_id {
-                    return Err("you can't revive yourself".to_string());
+                    return Err("you can't revive yourself".into());
                 }
                 // player has lives
                 player_flux.is_alive()?;
@@ -909,7 +909,7 @@ impl Game {
                 // return action event
                 ActionTypeEvent::Revive({
                     ReviveAction {
-                        target_user_id: target_user_id.to_string(),
+                        target_user_id: target_user_id.into(),
                     }
                 })
             }
@@ -925,7 +925,7 @@ impl Game {
                     // <EXECUTE>
                     self.curse_election.vote(&user_id, &target_user_id)?;
                     ActionTypeEvent::Curse(CurseAction {
-                        target_user_id: Some(target_user_id.to_string()),
+                        target_user_id: Some(target_user_id.into()),
                     })
                 } else {
                     self.curse_election.remove_vote(user_id)?;
@@ -976,7 +976,7 @@ impl Game {
         };
         // add player to action point update list
         action_point_updates.push((
-            user_id.to_string(),
+            user_id.into(),
             self.game_id.clone(),
             player_flux.action_points,
         ));
@@ -986,7 +986,7 @@ impl Game {
         Ok((
             PlayerResponse {
                 game_id: self.game_id.clone(),
-                user_id: user_id.to_string(),
+                user_id: user_id.into(),
                 phase: self.phase.clone(),
                 action,
             },
@@ -1001,10 +1001,10 @@ impl Game {
         // TODO match arm for all types of ActionTypeEvent
         PlayerResponse {
             action: ActionTypeEvent::Curse(CurseAction {
-                target_user_id: self.curse_election.get_voter_vote(player_id),
+                target_user_id: self.curse_election.get_voter_ballot(player_id),
             }),
-            user_id: player_id.to_string(),
-            game_id: self.game_id.to_string(),
+            user_id: player_id.into(),
+            game_id: self.game_id.to_owned(),
             phase: self.phase.clone(),
         }
     }

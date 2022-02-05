@@ -58,7 +58,7 @@ impl WsSession {
     fn clone_user_id(&self) -> Result<String, String> {
         self.user_id
             .clone()
-            .ok_or_else(|| "user not logged in".to_string())
+            .ok_or_else(|| "user not logged in".into())
     }
 
     fn mailbox_check<M>(
@@ -226,7 +226,7 @@ impl WsSession {
         let cmd = v.get(0).ok_or_else(|| "invalid command")?;
         let mut msg = String::new();
         if v.len() == 2 {
-            msg = v[1].clone().to_string();
+            msg = v[1].clone().into();
         }
         match *cmd {
             "/login" => self.relay_connect(msg, ctx),

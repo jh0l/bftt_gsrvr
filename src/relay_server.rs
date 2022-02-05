@@ -181,7 +181,7 @@ impl RelayServerSessions {
     }
     pub fn send_user(&self, user_id: &str, msg: &str) {
         if let Some(session) = self.map.get(user_id) {
-            self.do_send_log(session, msg.to_string());
+            self.do_send_log(session, msg.into());
         }
         // TODO log missing sessions
     }
@@ -246,7 +246,7 @@ impl Handler<Connect> for RelayServer {
             Some(existant) => {
                 if existant.password == password {
                     ConnectResult::Success(SuccessResult {
-                        alert: "user exists".to_string(),
+                        alert: "user exists".into(),
                         token: None,
                     })
                 } else {
@@ -256,7 +256,7 @@ impl Handler<Connect> for RelayServer {
             None => {
                 self.users.insert(user_id.clone(), msg.user);
                 ConnectResult::Success(SuccessResult {
-                    alert: "user created".to_string(),
+                    alert: "user created".into(),
                     token: None,
                 })
             }
@@ -333,7 +333,7 @@ impl Handler<HostGame> for RelayServer {
         else if let Some(game_id) = self.user_games.get(&host_user_id) {
             if let Some(game) = self.games.get(game_id) {
                 if game.host_user_id == Some(host_user_id.clone()) {
-                    return MessageResult(Err("already in another game".to_string()));
+                    return MessageResult(Err("already in another game".into()));
                 }
             }
             dbg!("user game outdated", host_user_id.clone(), game_id);
@@ -381,7 +381,7 @@ impl Handler<JoinGame> for RelayServer {
         // return err if user already in a game
         if let Some(cur_game_id) = self.user_games.get(&user_id) {
             if cur_game_id != &game_id {
-                return MessageResult(Err("already in a another game".to_string()));
+                return MessageResult(Err("already in a another game".into()));
             }
         }
         let mut insert_player_result = InsertPlayerResult::Joined;
@@ -541,12 +541,12 @@ impl Handler<PlayerActionRequest> for RelayServer {
         let user_games = &mut self.user_games;
         let res = user_games
             .get(&user_id)
-            .ok_or("user games not found".to_string())
+            .ok_or("user games not found".into())
             .and_then(|user_game_id| {
                 if user_game_id != &game_id {
-                    return Err("user game id invalid".to_string());
+                    return Err("user game id invalid".into());
                 }
-                games.get_mut(&game_id).ok_or("game id bad".to_string())
+                games.get_mut(&game_id).ok_or("game id bad".into())
             })
             .and_then(|game| {
                 game.player_action(&user_id, &action).map(|e| {
@@ -557,7 +557,7 @@ impl Handler<PlayerActionRequest> for RelayServer {
                             user_games.remove(user_id);
                             // tell RelayServer to send user new /user_status update through user session
                             ctx.notify(UserStatus {
-                                user_id: user_id.to_string(),
+                                user_id: user_id.into(),
                             });
                         }
                     }
