@@ -305,6 +305,8 @@ impl Election {
 #[cfg(test)]
 mod tests {
 
+    use log::debug;
+
     use crate::ovec;
 
     use super::*;
@@ -452,7 +454,7 @@ mod tests {
         let voters = ovec!["a", "b", "c", "d"];
         el.set_candidates(hashset(cand));
         el.set_voters(hashset(voters));
-        dbg!("start 1");
+        debug!("start 1");
         // single pref minority wins
         el.vote("a", ovec!["a"])?;
         el.apply_preferential_voting()?;
@@ -464,7 +466,7 @@ mod tests {
         assert_eq!(el.get_winners(), hashset(ovec!["a"]));
 
         el.reset();
-        dbg!("start 2");
+        debug!("start 2");
         // if two candidates have winning amount of votes, both win
         el.vote("a", ovec!["a"])?;
         el.vote("b", ovec!["b"])?;

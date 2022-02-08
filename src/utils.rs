@@ -10,7 +10,7 @@ pub mod ovec {
     mod tests {
         #[test]
         fn it_works() {
-            let x: Vec<String> = dbg!(ovec!["this", "that", "the other"]);
+            let x: Vec<String> = ovec!["this", "that", "the other"];
             assert_eq!(
                 x,
                 vec![

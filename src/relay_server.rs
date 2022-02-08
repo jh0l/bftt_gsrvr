@@ -13,6 +13,7 @@ use crate::game::PlayerActionResult;
 use crate::game::Pos;
 use crate::game::BOARD_SIZE;
 use actix::prelude::*;
+use log::debug;
 use rand::prelude::ThreadRng;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -155,7 +156,7 @@ impl RelayServerSessions {
     }
     fn do_send_log(&self, addr: &actix::Recipient<Message>, message: String) {
         if let Err(err) = addr.do_send(Message(message)) {
-            println!("[srv/m] do_send error: {:?}", err)
+            debug!("[srv/m] do_send error: {:?}", err);
             // TODO send errors to logging record
         }
     }
@@ -240,7 +241,7 @@ impl Handler<Connect> for RelayServer {
     type Result = MessageResult<Connect>;
     #[allow(unused_variables)]
     fn handle(&mut self, msg: Connect, _: &mut Context<Self>) -> Self::Result {
-        dbg!(msg.clone());
+        debug!("{:?}", &msg);
         let User { user_id, password } = msg.user.clone();
         let mut res = match self.users.get(&user_id) {
             Some(existant) => {
@@ -264,7 +265,7 @@ impl Handler<Connect> for RelayServer {
 
         // The HTTP GET:login endpoint uses Connect {} to log in the user
         // There is no socket in that case so msg.addr has to be None
-        dbg!(msg.addr.clone());
+        debug!("{:?}", &msg.addr);
         if let ConnectResult::Success(ref mut succ_res) = res {
             if msg.addr.is_some() {
                 let addr = msg.addr.expect("no address in msg");
@@ -281,7 +282,7 @@ impl Handler<Connect> for RelayServer {
                 self.sessions.verification_keys.insert(user_id.clone(), key);
             }
         }
-        dbg!(res.clone());
+        debug!("{:?}", &res);
         return MessageResult(res);
     }
 }
@@ -302,9 +303,9 @@ impl Handler<Disconnect> for RelayServer {
     fn handle(&mut self, msg: Disconnect, _: &mut Context<Self>) {
         let res = self.sessions.map.remove(&msg.user_id);
         if res.is_some() {
-            dbg!("disconnected {:?}", msg);
+            debug!("disconnected {:?}", msg);
         } else {
-            dbg!("unknown {:?}", msg);
+            debug!("unknown {:?}", msg);
         }
     }
 }
@@ -336,7 +337,11 @@ impl Handler<HostGame> for RelayServer {
                     return MessageResult(Err("already in another game".into()));
                 }
             }
-            dbg!("user game outdated", host_user_id.clone(), game_id);
+            debug!(
+                "{:?} {:?} user game outdated",
+                host_user_id.clone(),
+                game_id
+            );
             // TODO user is not actually host of game then ignore user_games?
         }
         let mut new_game = false;
@@ -620,7 +625,7 @@ impl Handler<SpawnTileHeart> for RelayServer {
                 Ok(())
             });
         if res.is_err() {
-            dbg!(&res);
+            debug!("{:?}", &res);
         }
     }
 }
@@ -670,7 +675,7 @@ impl Handler<Replenish> for RelayServer {
                 Ok(())
             });
         if res.is_err() {
-            dbg!(&res);
+            debug!("{:?}", &res);
         }
         MessageResult(res)
     }

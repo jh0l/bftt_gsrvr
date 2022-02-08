@@ -9,6 +9,7 @@ use crate::{
 use actix::prelude::*;
 use actix_web::{web, Error, HttpRequest, HttpResponse};
 use actix_web_actors::ws;
+use log::debug;
 use serde::Deserialize;
 use serde_json::from_slice;
 use std::time::{Duration, Instant};
@@ -42,7 +43,7 @@ impl WsSession {
             // check client hearbeats
             if Instant::now().duration_since(act.hb) > CLIENT_TIMEOUT {
                 // heartbeat timed out
-                dbg!("[srv/s] {:?} TIMED OUT, DISCONNECTING", &act.user_id);
+                debug!("[srv/s] {:?} TIMED OUT, DISCONNECTING", &act.user_id);
 
                 // stop actor
                 ctx.stop();
@@ -70,7 +71,7 @@ impl WsSession {
             Ok(m) => Ok(m),
             Err(e) => {
                 ctx.text(MsgResult::error("server", "mailbox error"));
-                dbg!(e);
+                debug!("{:?}", e);
                 Err(())
             }
         }
@@ -253,7 +254,7 @@ impl Actor for WsSession {
     }
 
     fn stopping(&mut self, _: &mut Self::Context) -> Running {
-        println!("[srv/s] {:?} WS SESSION STOPPING", self.user_id);
+        debug!("[srv/s] {:?} WS SESSION STOPPING", self.user_id);
         // notify relay server
         if let Some(user_id) = self.user_id.clone() {
             self.server_addr.do_send(Disconnect { user_id });
@@ -276,7 +277,7 @@ impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for WsSession {
     fn handle(&mut self, msg: Result<ws::Message, ws::ProtocolError>, ctx: &mut Self::Context) {
         let msg = match msg {
             Err(err) => {
-                println!("[srv/s] RECEIVED ERROR FROM WS CLIENT {:?}", err);
+                debug!("[srv/s] RECEIVED ERROR FROM WS CLIENT {:?}", err);
                 ctx.stop();
                 return;
             }
