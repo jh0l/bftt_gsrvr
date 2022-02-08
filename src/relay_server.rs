@@ -635,7 +635,7 @@ impl Handler<Replenish> for RelayServer {
             .get_mut(&game_id)
             .ok_or("Game not found".to_owned())
             .and_then(|game| {
-                let cursed = game.curse_election.redeem();
+                let cursed = game.curse_election.get_winners();
                 let apu = game.replenish(&cursed)?;
                 game.curse_election.reset();
                 Ok((game, apu))

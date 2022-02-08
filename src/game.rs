@@ -6,6 +6,7 @@ use std::fmt::{Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::{ConfigGameOp, InitPosConfig};
+use crate::election::Election;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pos {
@@ -144,124 +145,6 @@ impl PlayersAliveDead {
 
     pub fn alive_len(&self) -> usize {
         self.alive.len()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Election {
-    name: String,
-    candidates: HashSet<String>,
-    voters: HashSet<String>,
-    vote_count: HashMap<String, HashSet<String>>,
-    voter_vote: HashMap<String, String>,
-}
-
-impl Election {
-    pub fn new(name: String) -> Election {
-        Election {
-            name,
-            candidates: HashSet::new(),
-            voters: HashSet::new(),
-            vote_count: HashMap::new(),
-            voter_vote: HashMap::new(),
-        }
-    }
-
-    pub fn remove_vote(&mut self, voter_id: &str) -> Result<(), String> {
-        if let Some(old_c_id) = self.voter_vote.get(voter_id) {
-            self.vote_count.get_mut(old_c_id).and_then(|v| {
-                v.remove(voter_id);
-                Some(())
-            });
-        }
-        // insert voter's vote in voter vote
-        self.voter_vote.remove(voter_id);
-        Ok(())
-    }
-
-    pub fn vote(&mut self, voter_id: &str, candidate_id: &str) -> Result<(), String> {
-        // <VALIDATE>
-        // voter must be in voters
-        if !self.voters.contains(voter_id) {
-            return Err(format!("player cannot vote in {}", self.name).to_string());
-        }
-        // candidate must be in candidates
-        if !self.candidates.contains(candidate_id) {
-            return Err(
-                format!("{} is not a candidate in {}", candidate_id, self.name).to_string(),
-            );
-        }
-        // remove old vote if it exists
-        if let Some(old_c_id) = self.voter_vote.get(voter_id) {
-            self.vote_count.get_mut(old_c_id).and_then(|v| {
-                v.remove(voter_id);
-                Some(())
-            });
-        }
-        // insert voter's vote in candidate vote count
-        if let None = self.vote_count.get(candidate_id) {
-            self.vote_count
-                .insert(candidate_id.to_string(), HashSet::new());
-        }
-        if let Some(count) = self.vote_count.get_mut(candidate_id) {
-            count.insert(voter_id.to_string());
-        }
-        // insert voter's vote in voter vote
-        self.voter_vote
-            .insert(voter_id.to_string(), candidate_id.to_string());
-        Ok(())
-    }
-
-    /// convert voter to candidate
-    pub fn convert_voter(&mut self, voter_id: &str) -> Result<(), String> {
-        self.voters.remove(voter_id);
-        self.candidates.insert(voter_id.to_string());
-        self.voter_vote.remove(voter_id).and_then(|candidate_id| {
-            self.vote_count.get_mut(&candidate_id).and_then(|vc| {
-                vc.remove(voter_id);
-                Some(())
-            });
-            Some(())
-        });
-        Ok(())
-    }
-
-    /// convert candidate to voter
-    pub fn convert_candidate(&mut self, candidate_id: &str) {
-        self.candidates.remove(candidate_id);
-        self.voters.insert(candidate_id.to_string());
-        self.vote_count.remove(candidate_id);
-        // TODO remove candidate from voter_votes and notify voters
-    }
-
-    /// get a voter's vote if any
-    pub fn get_voter_vote(&self, voter_id: &str) -> Option<String> {
-        self.voter_vote
-            .get(voter_id)
-            .and_then(|f| Some(f.to_owned()))
-    }
-
-    /// get winning candidates
-    pub fn redeem(&self) -> HashSet<String> {
-        // candidates must have at least 1 vote, candidates with empty hashsets are ignored
-        let mut len = 1;
-        let mut res: HashSet<String> = HashSet::new();
-        for (k, v) in &self.vote_count {
-            if v.len() == len {
-                res.insert(k.to_owned());
-            } else if v.len() > len {
-                res = HashSet::new();
-                res.insert(k.to_owned());
-                len = v.len();
-            }
-        }
-        res
-    }
-
-    /// reset votes
-    pub fn reset(&mut self) {
-        self.vote_count = HashMap::new();
-        self.voter_vote = HashMap::new();
     }
 }
 
@@ -436,7 +319,7 @@ impl Game {
             turn_end_unix: 0,
             config: GameConfig::new(),
             rnd,
-            curse_election: Election::new("cursings".to_string()),
+            curse_election: Election::new("cursings"),
         }
     }
 
@@ -592,7 +475,8 @@ impl Game {
                 Game::randomly_position(player, &die, &mut self.rnd, &mut self.board);
             }
         }
-        self.curse_election.candidates = self.players_alive_dead.alive.clone();
+        self.curse_election
+            .set_candidates(self.players_alive_dead.alive.clone());
         self.phase = GamePhase::InProg;
         self.turn_end_unix = from_now(self.config.turn_time_secs);
         Ok(())
@@ -775,7 +659,8 @@ impl Game {
                 // if players alive is 1 then end game
                 if target_flux.lives == 0 {
                     self.players_alive_dead.set_dead(&target_flux.user_id);
-                    self.curse_election.convert_candidate(&target_flux.user_id);
+                    self.curse_election
+                        .move_candidate_to_voter(&target_flux.user_id)?;
                     // transfer remaining action points to attacker
                     player_flux.action_points += target_flux.action_points;
                     target_flux.action_points = 0;
@@ -896,10 +781,12 @@ impl Game {
                 player_flux.lives -= 1;
                 target_flux.lives += 1;
                 self.players_alive_dead.set_alive(&target_flux.user_id);
-                self.curse_election.convert_voter(&target_flux.user_id)?;
+                self.curse_election
+                    .move_voter_to_candidate(&target_flux.user_id)?;
                 if player_flux.lives < 1 {
                     self.players_alive_dead.set_dead(&player_flux.user_id);
-                    self.curse_election.convert_candidate(&player_flux.user_id);
+                    self.curse_election
+                        .move_candidate_to_voter(&player_flux.user_id)?;
                 }
                 // queue player_alive_dead update
                 players_alive_dead = Some(self.players_alive_dead.clone());
@@ -923,12 +810,13 @@ impl Game {
                     let target_flux = self.clone_player(&target_user_id)?;
                     target_flux.is_alive()?;
                     // <EXECUTE>
-                    self.curse_election.vote(&user_id, &target_user_id)?;
+                    self.curse_election
+                        .vote(&user_id, vec![target_user_id.clone()])?;
                     ActionTypeEvent::Curse(CurseAction {
                         target_user_id: Some(target_user_id.into()),
                     })
                 } else {
-                    self.curse_election.remove_vote(user_id)?;
+                    self.curse_election.remove_ballot(user_id)?;
                     ActionTypeEvent::Curse(CurseAction {
                         target_user_id: None,
                     })
@@ -961,7 +849,8 @@ impl Game {
                         if player_flux.lives == 1 {
                             // execute revive
                             self.players_alive_dead.set_alive(&player_flux.user_id);
-                            self.curse_election.convert_voter(&player_flux.user_id)?;
+                            self.curse_election
+                                .move_voter_to_candidate(&player_flux.user_id)?;
                             players_alive_dead = Some(self.players_alive_dead.clone());
                         }
                         ActionTypeEvent::Redeem(RedeemAction::TileHearts(RedeemTileHearts {
